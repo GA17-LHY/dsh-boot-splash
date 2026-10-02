@@ -1,0 +1,100 @@
+# boot-splash
+
+自建 DSH **启动画面**插件：开机时叠一段全窗口画面（默认为渐变底），片尾交叉溶解进界面。
+
+**为什么自己写**：那款第三方插件（`dsh-boot-animation`）的功能能用，但它的设置卡片在桌面端**永远出不来**，因为它把配置卡挂到了 `plugins.item` —— 那是**官方插件**用的槽位；asar 里 harness 自带的作者文档写明，第三方 **bundle** 的配置应挂 `plugins.bundle.config`（以包名为键）。另外它还有一串会咬人的坑（`tools/` 不在 npm `files` 白名单、`install.ps1` 用本机端口判成败会误回滚、成功日志藏在 `?dshbootdiag=1` 后面、静态 import 缺 peer 即整插件死、卡片从没在真机 GUI 验证过）。本插件把这几点逐个改掉。
+
+## 三个文件
+
+| 文件 | 跑在哪 | 干什么 |
+|---|---|---|
+| `host.js` | DSH 进程 | 读配置、挂 4 条路由（清单/体检/配置读/配置写/素材字节）、订阅 `webserver/index-inject` 注入开机面板 |
+| `panel.js` | 浏览器（**外壳模块之前**） | 开机覆盖层本体：框架无关、注入为 head 脚本；每条走不下去的路都有上界，且**失败必定可见** |
+| `client.js` | 浏览器（客户端插件） | ①向面板报到（`clientReady`）②把设置界面**两条通路都挂** |
+
+## 两条 DSH 事实（写死在代码里的前提，别动）
+
+1. **`webserver/index-inject` 是唯一足够早的时机** —— 推进去的行会渲染进 `<head>`，早于外壳模块；更晚的任何手段都盖不住内核启动页。
+2. **路由必须 `exact`，只有 `/clip` 用 `prefix`** —— 在 `/plugins/boot-splash` 上挂 prefix 会把 `/plugins/boot-splash/client.js` 一起吃掉，而那是 client-modules 用来物化本包客户端 bundle 的 URL ⇒ 客户端半侧永远加载不了。
+
+## 配置
+
+文件：`$DSH_HOME/boot-splash.json`（默认 `~/.dsh/boot-splash.json`）。**不存在也能跑**（用默认值）。
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | `true` | 总开关。关掉 = 一行都不注入、一次素材请求都不发（真关，不是"脚本自己判断"） |
+| `fadeMs` | `2000` | 淡入淡出时长，0–10000 |
+| `enterMode` | `"tail"` | `tail` 片尾交叉溶解 / `end` 放完再淡 / `click` 点击才进 |
+| `holdMs` | `15000` | 最长等待：内核迟迟不就绪时，到点提示"点一下可以进入" |
+| `dir` | `""` | 素材目录（绝对路径或 `~/`）。**留空 = 用包内自带素材**（`assets/videos`）；两边都没有则只有渐变底。**想只要渐变底**就把 `dir` 指向一个空目录 |
+| `clips` | `[]` | 参与轮播的文件名；空 = 目录里所有 `.mp4/.webm/.m4v/.mov` |
+| `sound` | `"gesture"` | 声音：`gesture` 静音起播、第一下点击开声（默认）/ `auto` 先试带声自动播放（浏览器可能拒，会退回静音）/ `mute` 始终静音且不提示 |
+| `volume` | `100` | 音量 0–100 |
+
+> **为什么不能"自动就有声音"**：Chromium 的策略是**没有用户手势就不允许带声音自动播放**，页面里无法绕过（这是宿主窗口的 `autoplayPolicy`，插件改不了）。所以默认是"静音起播 + 第一下点击开声"，`auto` 只是"先试一次"，被拒会退回静音并在提示行写出原因。
+
+**坏配置不会让插件挂**：字段逐个校验，不合格的落回默认值并把原因记下来（`/status.json`、宿主日志、设置界面里都能看到）。写盘是原子写（先写临时文件再改名），且**只合并**——界面上只改一项不会把别的项抹掉。
+
+## 设置界面：两条通路都挂
+
+- `settings.section` —— 设置里的整页「启动画面」（皮肤插件用的就是它）
+- `plugins.bundle.config` —— 插件页里按包名分组的配置位（keyed 槽）
+
+> **两条通路的实测结论（2026-10-02 真机验证）**：**都必须用 `slots.inject(槽名, cb)` 等槽出现，再在回调里 `slots.register(...)`**。
+> 直接 `slots.register(...)` 会抛 `slot "…" is not declared (a parent entry's children table must declare it)` —— 这些槽是由父条目（设置页 / 插件页）声明为子槽的，页面还没挂上时它们并不存在。
+> keyed 槽的正确形状：`slots.register({ name: 'plugins.bundle.config', key: '<包名>' }, Component)`。
+> （同一个坑：部署里的 `meow-memory` 也用直接 register，于是每次语言变化都在控制台抛同一个错。）
+
+**读写在宿主路由上**（`GET/POST /plugins/boot-splash/config.json`），**不碰 DSH 设置服务** ⇒ 不依赖 schemastery / `.volatile()` / `whileServed` 那一整条链——那正是上一款插件"卡片静默消失且无错可查"的来源。
+
+写接口的两道守卫：必须带 `x-boot-splash-write: 1` 头（跨源简单请求带不上自定义头），且带 `Origin` 时必须是本机回环。残余风险：**本机任意进程**仍可直连回环写这个配置（它只影响自己的启动画面，影响面有限）。
+
+## 安装 / 更新 / 卸载
+
+**装**（两条路，选一条）：
+1. **App 插件管理器**（推荐，官方入口）：侧栏「插件」→ 添加插件 → 粘**本插件所在目录的绝对路径**（你 clone / 解压到哪就填哪，跨机器一样）；
+2. **手工接线**（开发用，即时生效）：在 `<profile>/node_modules` 下建 junction 指向本目录，并把 `"boot-splash": "link:<本目录>"` 加进 profile 的 `dependencies`，同时把 `"boot-splash"` 加进 `dsh.profile.bundles`。
+
+**生效规则**（改完要不要重启）：改 `panel.js` / 配置 / 素材 ⇒ **刷新页面**即可；改 `host.js` ⇒ **重启 DSH**；改 `client.js` ⇒ 刷新，若没变化再重启。
+
+**卸**：删 junction + 去掉那两处记账 + 删配置行（若你手工加过 `cordis.patch.yml` 的行，也一并删掉）。
+
+### 换一台电脑装（跨机器自足）
+
+本包**刻意做成自足**，换机器不需要任何额外准备：
+
+- **无依赖**：`package.json` 里**没有 `dependencies`、也没有 `peerDependencies`** ⇒ 不跑 `pnpm install`、不需要 schemastery（那正是上一款插件"静态 import 解析不到就整个插件死"的来源）；
+- **无本机路径**：宿主侧路径全部来自 `import.meta.url` / `process.env.DSH_HOME` / `os.homedir()`，代码与配置里**没有任何写死的盘符**；
+- **自带素材**：三段 mp4 随包分发（见下方署名），所以**装完即有画面**，不用再配 `dir`；
+- **平台差异有兜底**：顶部"让出系统标题栏"只在检测到 `[data-windows-titlebar]` 时生效，macOS/Linux 自动不偏移；全屏态也不偏移；
+- **需要**：DSH 桌面端（0.2.0-rc.2 级别，客户端插件体系 + `webserver/index-inject` 钩子）；Node ≥ 22.19 仅在你跑 `tests/` 时需要。
+
+装法同上：App 插件管理器 →「添加插件」→ 粘**这份目录**的绝对路径 → 安装 → **重启 App**（宿主半侧换了就要重启；之后改设置只需刷新）。
+
+## 素材署名
+
+`assets/videos/` 里的三段 mp4 **不是本项目的作品**，而是按 MIT 从其来源项目**原样再分发**：
+
+- 来源：`lxj5820/dsh-boot-animation`（<https://github.com/lxj5820/dsh-boot-animation>）
+- 原始版权行：`Copyright (c) 2026 dsh-boot-animation contributors`
+- **完整 MIT 文本已随素材放在** `assets/videos/LICENSE-dsh-boot-animation.txt`（MIT 对再分发的要求就是保留声明与许可）
+- ⚠️ **生成方式（上游未写，从元数据读出）**：`1.mp4` / `2.mp4` 内嵌 **C2PA 内容凭证**，写着 `softwareAgent = Volcengine_Ark_CN 1.0.0`、`model_name = doubao-seedance-2-5 / -2-0`、`digitalSourceType = trainedAlgorithmicMedia`、生成时间 2026-09-26 ⇒ **这两段由 AI 视频模型生成**。上游的原话是「the author's own animation work」（LICENSE 末尾）、「作者自己的动画」（INSTALL.md:58）——**两者不冲突**："自己的作品"不等于"手工绘制"。我们照 MIT 原样再分发、保留其声明，只把上游没写的这一层如实补记（若要商用，请自行核对生成服务条款）。
+
+不想带第三方素材：删掉 `assets/videos/`，或把 `dir` 指到别处 —— 插件会退化成纯渐变底。详见 [CREDITS.md](CREDITS.md)。
+
+## 验证
+
+```sh
+node tests/verify.mjs        # 73 项，离线、不需要 DSH、不需要浏览器
+```
+
+覆盖：配置校验（坏输入不抛、逐字段兜底）、原子写与拒绝写入、素材列举与 faststart 判定、体检与宿主日志、**apply 挂 4 条路由 + 开=推 2 行 / 关=推 0 行**、manifest/status/config 读、写守卫（无自定义头 403 / 非本机 Origin 403 / 本机 200）、素材字节路由（200 + no-store + Range）、**穿越尝试被拒**、以及客户端半侧的桩测试（报到 + 两条通路都尝试注册）。
+
+## 已知边界
+
+- 不做转码：`moov` 在尾部的 mp4 会标成「未优化」（界面里有提示），播放仍可能不显示首帧——建议自己先 faststart 一遍。
+- **Windows 桌面端的窗口按钮是系统画的 `titleBarOverlay`**（浅色主题下是近黑图标，背景在开机早期是透明的）⇒ 全屏覆盖会把它们衬成"黑底黑图标"（2026-10-02 用户实际报的现象）。因此开机画面**顶部让出标题栏那一条**（高度取宿主的 `--dsh-windows-titlebar-height`，全屏态不偏移），并用宿主自己的 chrome 底色兜住它 ⇒ 最小化/最大化/关闭与**拖拽窗口**在整个动画期间都可用。
+- 面板的"开声音"依赖用户手势（Chromium 的自动播放策略），默认静音自动播放。
+- `holdMs` 到点只是**提示可点击**；另有绝对上限（`holdMs + 20s`）强制进入，**不会把你卡在启动页**。
+- 本插件不修改 DSH 本体任何文件；升级 DSH 只需重新确认 `index-inject` 这个钩子是否还在。
