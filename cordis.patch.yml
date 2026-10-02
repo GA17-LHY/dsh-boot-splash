@@ -1,0 +1,11 @@
+# boot-splash 的 bundle patch 层。
+#
+# 作用只有一个：让宿主扫描到一个「已启用的 Loader 条目」——
+# ① 宿主半侧（host.js）才会被加载（路由 + index 注入）；
+# ② 客户端半侧（client.js）才会作为客户端 bundle 提供给浏览器。
+#
+# 条目 id 同时是设置命名空间的键（本插件不用 settings 命名空间，
+# 但 client.js 里注册插件页卡片时会用到同一个字符串，改这里要同步改那边）。
+- insert:
+    - id: boot-splash
+      name: boot-splash

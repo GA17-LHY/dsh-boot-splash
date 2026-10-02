@@ -1,0 +1,31 @@
+{
+  "name": "boot-splash",
+  "version": "0.1.0",
+  "description": "自建 DSH 启动画面插件：开机叠一段全窗口画面并溶解进界面；设置界面同时挂「插件页」与「设置整页」两条通路；配置以纯 JSON 文件为准，不依赖 schemastery。",
+  "license": "MIT",
+  "author": "GA17-LHY",
+  "private": true,
+  "type": "module",
+  "main": "host.js",
+  "exports": {
+    ".": "./host.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

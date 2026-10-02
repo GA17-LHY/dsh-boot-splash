@@ -1,0 +1,71 @@
+These three clips (1.mp4, 2.mp4, 3.mp4) are NOT part of boot-splash's own work.
+
+They are redistributed verbatim from the MIT-licensed project:
+
+    lxj5820/dsh-boot-animation
+    https://github.com/lxj5820/dsh-boot-animation
+
+whose LICENSE states the following (reproduced in full, as the MIT license requires
+for redistributed copies):
+
+--------------------------------------------------------------------------
+MIT License
+
+Copyright (c) 2026 dsh-boot-animation contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+--------------------------------------------------------------------------
+
+## Provenance — what the files themselves say (verified, not assumed)
+
+1.mp4 and 2.mp4 embed **C2PA content credentials** in their `udta/meta/ilst`
+metadata. Reading those manifests yields:
+
+    c2pa.created  when = 2026-09-26T09:06:22Z
+      softwareAgent: name = "Volcengine_Ark_CN", version = "1.0.0"
+      model_name   = "doubao-seedance-2-5"
+      digitalSourceType = http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia
+
+    c2pa.created  when = 2026-09-26T04:04:17Z
+      softwareAgent: name = "Volcengine_Ark_CN", version = "1.0.0"
+      model_name   = "doubao-seedance-2-0"
+      digitalSourceType = http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia
+
+i.e. **these are AI-generated clips** (Doubao/Seedance video models served by
+Volcengine Ark). 3.mp4 carries an x264 encoder tag but no C2PA manifest.
+
+The upstream project describes the clips as the author's own animation work. That
+description is **inaccurate as far as the metadata shows** — we redistribute them
+under the MIT license they came with, keep this notice, and record the discrepancy
+here rather than repeating the claim.
+
+## What this means if you reuse them
+
+- The MIT grant above covers what the upstream project distributed; we pass it on
+  unchanged.
+- Separately, AI-generated media may also be subject to the terms of the service
+  that produced it (here: Volcengine Ark / Doubao). **We have not reviewed those
+  terms.** If you plan to publish or commercialise these clips, check them yourself
+  — or simply replace the clips with your own (see below).
+- No personal information was found in the clips: a printable-string scan over all
+  three files found no user names, home directories or drive paths. The only
+  identifying strings are the service/model names and timestamps quoted above.
+
+If you do not want third-party media in your copy, delete this directory (or point
+the `dir` setting somewhere else) — boot-splash falls back to a plain gradient.
