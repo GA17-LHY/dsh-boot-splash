@@ -29,6 +29,9 @@
   var SOUND = cfg.sound === 'auto' || cfg.sound === 'mute' ? cfg.sound : 'gesture'
   /** 启动画面形态（config.mode）：video / status / both。 */
   var SPLASH = cfg.mode === 'status' || cfg.mode === 'both' ? cfg.mode : 'video'
+  /** 状态窗每行**至少**间隔多久露面（config.lineGapMs）。这是回放节奏；行首时间戳仍是实测值。 */
+  var LINE_GAP = typeof cfg.lineGapMs === 'number' && cfg.lineGapMs >= 0 && cfg.lineGapMs <= 2000
+    ? cfg.lineGapMs : 120
   var SHOW_STATUS = SPLASH !== 'video'
   var SHOW_VIDEO = SPLASH !== 'status'
   if (!SHOW_VIDEO) SOUND = 'mute'        // 没有视频就没有"开声音"这回事
@@ -207,6 +210,8 @@
     if (!state.clipDone) return
     // 启动有失败项就不自动进：这个窗口存在的意义之一就是让人看见失败
     if (S && S.failures.length > 0) { setHint('启动有失败项 · 读完后点一下进入'); return }
+    // 回放还没追平就先别进：否则后面几行会被一起带走，等于没看见
+    if (S && S.revealed < S.lines.length) { setHint('正在逐行回放启动过程…'); return }
     if (!state.ready) { setHint('启动较慢，就绪后自动进入（点一下可立即进入）'); return }
     enter()
   }
@@ -711,6 +716,7 @@
       bootSeen: false, bootTotal: 0, bootDetail: '',
       arc: null, arcShown: null, shellText: '', shellSeen: false, shellGone: false,
       resSeen: {}, failures: [], fcp: false,
+      revealed: 0, lastRevealAt: 0,
     }
     var hb = Array.isArray(cfg.bootEvents) ? cfg.bootEvents : []
     for (var i = 0; i < hb.length; i += 1) statusPush(hb[i].at, 'host', String(hb[i].label))
@@ -805,13 +811,27 @@
           short + '  ' + (size / 1048576).toFixed(2) + ' MB / ' + Math.round(r.duration) + 'ms')
       }
     } catch (e) { /* 忽略 */ }
+    // 逐行露面：每行至少隔 LINE_GAP 毫秒；攒在队列里一起蹦出来会看不清顺序。
+    if (LINE_GAP === 0) {
+      S.revealed = S.lines.length          // 不节流：来多少显示多少
+    } else if (S.revealed < S.lines.length) {
+      var nowMs = Date.now()
+      // 第一行立刻露面；之后每行至少隔 LINE_GAP
+      if (S.lastRevealAt === 0 || nowMs - S.lastRevealAt >= LINE_GAP) {
+        S.revealed += 1
+        S.lastRevealAt = nowMs
+      }
+    }
+    // 回放追平 ⇒ 重新评估能否进入（进入闸门可能一直压着没放行）
+    if (S.revealed >= S.lines.length && S.revealed > 0 && !state.entered && !state.leaving) maybeEnter()
     renderStatus()
   }
 
   function renderStatus() {
     if (!S || !nodes.statusLog) return
     var body = ''
-    for (var i = 0; i < S.lines.length; i += 1) {
+    var shown = Math.min(S.revealed, S.lines.length)
+    for (var i = 0; i < shown; i += 1) {
       var L = S.lines[i]
       var rel = (L.abs - S.t0) / 1000
       body += (rel >= 0 ? '+' : '') + rel.toFixed(2) + 's  ' + L.src + '  ' + L.text + '\n'
@@ -820,7 +840,8 @@
     var used = ((Date.now() - S.t0) / 1000).toFixed(1)
     var pct = S.arc === null ? '不确定（shell 未提供）' : Math.round(S.arc * 100) + '%'
     var head = '启动状态 · 已用 ' + used + 's · 激活进度 ' + pct +
-      ' · 启动图 ' + (S.bootSeen ? S.bootTotal + ' 条' : '等待中')
+      ' · 启动图 ' + (S.bootSeen ? S.bootTotal + ' 条' : '等待中') +
+      (LINE_GAP > 0 ? ' · 逐行回放（行首时刻为实测）' : '')
     if (S.lastHead !== head) { nodes.statusHead.textContent = head; S.lastHead = head }
     var tail = state.ready ? '✓ 外壳已就绪，正在进入…' : '… 等待外壳就绪'
     var cls = state.ready ? 'ok' : ''

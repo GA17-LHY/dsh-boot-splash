@@ -43,6 +43,11 @@ window.__ModuleLoader__.load({
         soundMute: '始终静音（不提示开声）',
         volume: '音量 0–100',
         holdMs: '最长等待（毫秒）',
+        mode: '启动画面形态',
+        modeVideo: '视频（全窗口播放素材）',
+        modeStatus: '代码窗（启动状态窗，开机时显示程序在做什么）',
+        modeBoth: '视频 + 状态窗（视频作背景）',
+        lineGapMs: '逐行回放间隔（毫秒，0 = 不节流）',
         dir: '素材目录（留空＝只有渐变底）',
         clips: '参与轮播的文件名（每行一个；留空＝目录内全部）',
         save: '保存',
@@ -72,6 +77,11 @@ window.__ModuleLoader__.load({
         soundMute: 'Always muted (no sound hint)',
         volume: 'Volume 0–100',
         holdMs: 'Max wait (ms)',
+        mode: 'Boot screen style',
+        modeVideo: 'Video (full-window clip)',
+        modeStatus: 'Code window (boot status, no video)',
+        modeBoth: 'Video + status window',
+        lineGapMs: 'Line pacing (ms, 0 = off)',
         dir: 'Clip directory (empty = gradient only)',
         clips: 'File names in rotation (one per line; empty = all in dir)',
         save: 'Save',
@@ -143,6 +153,20 @@ window.__ModuleLoader__.load({
           type: 'checkbox',
           checked: state.enabled === true,
           onChange: function (e) { setState({ enabled: e.target.checked }) },
+        })
+      }))
+      rows.push(field('mode', function () {
+        var modes = [['video', 'modeVideo'], ['status', 'modeStatus'], ['both', 'modeBoth']]
+        return h('select', {
+          value: value(state.mode, 'video'),
+          onChange: function (e) { setState({ mode: e.target.value }) },
+        }, modes.map(function (m) { return h('option', { key: m[0], value: m[0] }, t(m[1])) }))
+      }))
+      rows.push(field('lineGapMs', function () {
+        return h('input', {
+          type: 'number',
+          value: value(state.lineGapMs, 120),
+          onChange: function (e) { setState({ lineGapMs: Number(e.target.value) }) },
         })
       }))
       rows.push(field('fadeMs', function () {
@@ -281,6 +305,7 @@ window.__ModuleLoader__.load({
               enabled: e.enabled, fadeMs: e.fadeMs, enterMode: e.enterMode,
               holdMs: e.holdMs, dir: e.dir, clips: e.clips,
               sound: e.sound, volume: e.volume,
+              mode: e.mode, lineGapMs: e.lineGapMs,
             })
             state = Object.assign({}, state, { busy: false, effective: out.effective, message: '已保存（刷新页面生效）' })
             log('配置已保存')

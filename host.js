@@ -97,6 +97,13 @@ export const DEFAULTS = Object.freeze({
    *  · `both`   —— 视频作背景，状态面板叠在上面（面板刻意做得很廉价，但仍会增加合成开销）
    */
   mode: 'video',
+  /**
+   * 状态窗里每行**至少**间隔多久才露面（毫秒，0–2000，默认 120）。
+   * 这是**回放节奏**，不是实测：真实执行可能几百毫秒内就把几十条事件全挤出来，
+   * 逐行露面是为了让人看清顺序。行首的时间戳仍是**实测时刻**，不是编的。
+   * 设 0 = 不节流，来多少显示多少。
+   */
+  lineGapMs: 120,
 })
 
 /* ------------------------------------------------------------------ 配置读写 */
@@ -152,6 +159,11 @@ export function validateConfig(raw) {
   if ('diag' in raw) {
     if (typeof raw.diag === 'boolean') out.diag = raw.diag
     else problems.push('diag 必须是布尔值，已用默认值')
+  }
+  if ('lineGapMs' in raw) {
+    const n = Number(raw.lineGapMs)
+    if (Number.isFinite(n) && n >= 0 && n <= 2000) out.lineGapMs = Math.round(n)
+    else problems.push('lineGapMs 必须是 0–2000 的数字，已用默认值')
   }
   if ('mode' in raw) {
     if (SPLASH_MODES.includes(raw.mode)) out.mode = raw.mode
@@ -686,6 +698,7 @@ export function apply(ctx) {
         diag: cfg.value.diag === true,
         delayMs: cfg.value.delayMs,
         mode: cfg.value.mode,
+        lineGapMs: cfg.value.lineGapMs,
         // 宿主侧的启动事件（绝对时刻）——面板据此把两侧事件排进同一条时间轴
         bootEvents: BOOT_EVENTS.slice(),
         hostStartedAt: BOOT_EVENTS.length > 0 ? BOOT_EVENTS[0].at : Date.now(),
