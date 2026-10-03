@@ -27,6 +27,11 @@
   // 声音三种模式：'auto' 先试带声自动播放（被浏览器拒就退回静音 + 提示）／
   // 'gesture'（默认）静音起播、第一下点击开声／'mute' 始终静音且不提示开声。
   var SOUND = cfg.sound === 'auto' || cfg.sound === 'mute' ? cfg.sound : 'gesture'
+  /** 启动画面形态（config.mode）：video / status / both。 */
+  var SPLASH = cfg.mode === 'status' || cfg.mode === 'both' ? cfg.mode : 'video'
+  var SHOW_STATUS = SPLASH !== 'video'
+  var SHOW_VIDEO = SPLASH !== 'status'
+  if (!SHOW_VIDEO) SOUND = 'mute'        // 没有视频就没有"开声音"这回事
   var VOLUME = typeof cfg.volume === 'number' && cfg.volume >= 0 && cfg.volume <= 100 ? cfg.volume / 100 : 1
   /** 诊断总开关（宿主注入，来自 config.diag）。默认 false ⇒ 本文件不采、不报、不多发一个请求。 */
   var DIAG = cfg.diag === true
@@ -64,6 +69,15 @@
     '.boot-splash-problems{font-size:12px;opacity:.8;text-align:left}',
     '.boot-splash-btn{pointer-events:auto;border:1px solid rgba(223,241,247,.45);background:rgba(5,13,18,.45);',
     'color:#dff1f7;border-radius:999px;padding:4px 12px;font:12px/1.4 inherit;cursor:pointer}',
+    // 启动状态窗：纯文本、无模糊/无动画（理由见 panel.js 里那段注释）
+    '.boot-splash-status{position:absolute;inset:0;padding:22px 26px 96px 26px;box-sizing:border-box;',
+    'color:#d6ecf5;font:12px/1.6 ui-monospace,Consolas,"Cascadia Mono","Microsoft YaHei",monospace;',
+    'pointer-events:none;display:flex;flex-direction:column;gap:8px}',
+    '.boot-splash-status-head{color:#8fd3e8;font-weight:600;font-size:13px}',
+    '.boot-splash-status-log{flex:1 1 auto;white-space:pre-wrap;overflow:hidden;opacity:.94}',
+    '.boot-splash-status-tail{color:#bcd6e2}',
+    '.boot-splash-status-tail.ok{color:#8fe3a8}',
+    '.boot-splash-status-tail.bad{color:#ffb0b0}',
   ].join('')
 
   function part(tag, cls, text) {
@@ -74,6 +88,10 @@
   }
 
   var nodes = {}
+  var statusEl = null
+  var statusHead = null
+  var statusLog = null
+  var statusTail = null
 
   function build() {
     var style = document.getElementById(STYLE_ID)
@@ -101,6 +119,17 @@
     if (sound) ui.appendChild(sound)
     root.appendChild(ui)
 
+    if (SHOW_STATUS) {
+      statusEl = part('div', 'boot-splash-status')
+      statusHead = part('div', 'boot-splash-status-head', '启动状态…')
+      statusLog = part('div', 'boot-splash-status-log', '')
+      statusTail = part('div', 'boot-splash-status-tail', '')
+      statusEl.appendChild(statusHead)
+      statusEl.appendChild(statusLog)
+      statusEl.appendChild(statusTail)
+      root.appendChild(statusEl)
+    }
+
     // 标题栏条（见 titlebarInset 的说明）：与覆盖层同级，固定贴顶。
     var strip = part('div', 'boot-splash-top')
     strip.setAttribute('data-on', '0')
@@ -110,7 +139,11 @@
     parent.appendChild(root)
     applyTitlebarInset(root, strip)
     watchTitlebar(root, strip)
-    nodes = { root: root, ui: ui, hint: hint, problems: problems, sound: sound, video: null, strip: strip }
+    nodes = {
+      root: root, ui: ui, hint: hint, problems: problems, sound: sound,
+      video: null, strip: strip,
+      statusEl: statusEl, statusHead: statusHead, statusLog: statusLog, statusTail: statusTail,
+    }
     return nodes
   }
 
@@ -172,6 +205,8 @@
     if (state.entered || state.leaving) return
     if (MODE === 'click') return                    // 点才进：只有手势能放行
     if (!state.clipDone) return
+    // 启动有失败项就不自动进：这个窗口存在的意义之一就是让人看见失败
+    if (S && S.failures.length > 0) { setHint('启动有失败项 · 读完后点一下进入'); return }
     if (!state.ready) { setHint('启动较慢，就绪后自动进入（点一下可立即进入）'); return }
     enter()
   }
@@ -308,6 +343,13 @@
 
   function start() {
     if (state.leaving) return
+    if (!SHOW_VIDEO) {
+      // status 模式：没有片子可等 ⇒ 立刻算"片完"，进入条件只剩「外壳就绪」
+      state.clipDone = true
+      statusPush(Date.now(), 'panel', '状态窗模式：不拉素材、不建 video')
+      maybeEnter()
+      return
+    }
     fetch(cfg.manifest, { cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)) })
       .then(function (data) {
@@ -604,6 +646,11 @@
       waiting: D.waiting, stalled: D.stalled,
       events: D.events, sec: D.sec, hb: D.hb, long: D.long,
       vis: D.vis,
+      status: S ? {
+        bootSeen: S.bootSeen, bootTotal: S.bootTotal, bootDetail: S.bootDetail,
+        arc: S.arc, shellText: S.shellText, failures: S.failures,
+        lines: S.lines.slice(-14),
+      } : null,
       quality: D.quality, tries: TRIES,
     }
     var payload = b64url(JSON.stringify(report))
@@ -615,11 +662,182 @@
     try { console.info('boot-splash diag', report) } catch (e) { /* 忽略 */ }
   }
 
+  /* -------------------------------------------------------------- 启动状态窗 */
+
+  /**
+   * 启动状态窗（config.mode = status / both）。
+   *
+   * 铁律：**只显示实测到的**，每条都标来源；没读到就写「不确定」，绝不编。
+   *   · host     宿主进程侧事件（带绝对时间戳，随 cfg 注入）
+   *   · panel    面板自身进度
+   *   · shell    DSH 外壳的启动页 `[data-dsh-boot]` —— 真实激活进度，但**属内部实现**，读不到就降级
+   *   · net      资源加载（performance.getEntriesByType('resource')）
+   *   · renderer 渲染里程碑（DCL / load / 首帧 / 外壳就绪）
+   *
+   * 时间轴一律用**绝对时刻**（Date.now()）：面板的 performance.now() 与宿主进程的时钟原点
+   * 能差 1.4–2.1 秒（2026-10-03 实测），用相对时钟排序会把先后显示错。
+   *
+   * 刻意做得**廉价**：纯文本 + 200ms 一次、只在文本变化时写 DOM。不做模糊/渐变/过渡/动画——
+   * 那是 2026-10-03 花了一整天解决掉的坑（启动期抢合成资源导致掉帧），别把它挖回来。
+   */
+  var S = null
+  var STATUS_TICK = 200
+
+  function statusPush(abs, src, text) {
+    if (!S || abs === undefined || abs === null) return
+    var last = S.lines[S.lines.length - 1]
+    if (last && last.text === text) return
+    S.lines.push({ abs: abs, src: src, text: text })
+    if (S.lines.length > 60) S.lines.shift()
+  }
+
+  /** 把 shell 启动页的进度弧换算成比例：arc = 72 + 比例×216（外壳 bundle 里就是这么 setProperty 的）。 */
+  function shellArc() {
+    try {
+      var sp = document.querySelector('[data-dsh-boot-spinner]')
+      if (!sp) return null
+      var raw = sp.style.getPropertyValue('--dsh-boot-arc') ||
+        (globalThis.getComputedStyle ? getComputedStyle(sp).getPropertyValue('--dsh-boot-arc') : '')
+      var deg = parseFloat(String(raw))
+      if (!isFinite(deg)) return null
+      return Math.max(0, Math.min(1, (deg - 72) / 216))
+    } catch (e) { return null }
+  }
+
+  function startStatus() {
+    if (!SHOW_STATUS || S) return
+    S = {
+      t0: Date.now(), lines: [], lastBody: null, lastHead: null, lastTail: null,
+      bootSeen: false, bootTotal: 0, bootDetail: '',
+      arc: null, arcShown: null, shellText: '', shellSeen: false, shellGone: false,
+      resSeen: {}, failures: [], fcp: false,
+    }
+    var hb = Array.isArray(cfg.bootEvents) ? cfg.bootEvents : []
+    for (var i = 0; i < hb.length; i += 1) statusPush(hb[i].at, 'host', String(hb[i].label))
+    statusPush(S.t0, 'panel', '面板脚本开始执行')
+    var anchorAt = typeof cfg.hostStartedAt === 'number' ? cfg.hostStartedAt : null
+    if (anchorAt !== null && !hb.length) statusPush(anchorAt, 'host', '宿主进程启动（无更早事件可读）')
+    try {
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () { statusPush(Date.now(), 'renderer', 'DOMContentLoaded') })
+        globalThis.addEventListener('load', function () { statusPush(Date.now(), 'renderer', 'load（页面资源加载完）') })
+      } else {
+        statusPush(Date.now(), 'renderer', 'DOMContentLoaded（面板执行时已完成）')
+      }
+    } catch (e) { /* 忽略 */ }
+    try {
+      if (globalThis.PerformanceObserver) {
+        var po = new globalThis.PerformanceObserver(function (list) {
+          var es = list.getEntries()
+          for (var j = 0; j < es.length; j += 1) {
+            if (S && !S.fcp) { S.fcp = true; statusPush(Date.now(), 'renderer', es[j].name + '（首次绘制）') }
+          }
+        })
+        po.observe({ type: 'paint', buffered: true })
+      }
+    } catch (e) { /* 忽略 */ }
+    S.timer = globalThis.setInterval(statusTick, STATUS_TICK)
+    statusTick()
+  }
+
+  /** 读启动图。形状以官方解析器为准：{rev, entries:[{id,url,rev,…}], batches:[{phase,url,rev,entries}]}。 */
+  function readBootGraph() {
+    if (!S || S.bootSeen) return
+    var g = null
+    try { g = globalThis.__DSH_BOOT__ } catch (e) { g = null }
+    if (g === null || typeof g !== 'object' || !Array.isArray(g.entries)) return
+    S.bootSeen = true
+    S.bootTotal = g.entries.length
+    var bs = 0
+    var ap = 0
+    if (Array.isArray(g.batches)) {
+      for (var i = 0; i < g.batches.length; i += 1) {
+        var b = g.batches[i] || {}
+        var n = Array.isArray(b.entries) ? b.entries.length : 0
+        if (b.phase === 'bootstrap') bs += n
+        else if (b.phase === 'application') ap += n
+      }
+    }
+    S.bootDetail = 'bootstrap ' + bs + ' / application ' + ap
+    statusPush(Date.now(), 'shell', '启动图到手：' + S.bootTotal + ' 条客户端插件（' + S.bootDetail + '）')
+  }
+
+  function statusTick() {
+    if (!S || state.leaving) return
+    readBootGraph()
+    try {
+      var root = document.querySelector('[data-dsh-boot]')
+      if (root) {
+        if (!S.shellSeen) { S.shellSeen = true; statusPush(Date.now(), 'shell', 'shell 启动页出现') }
+        var arc = shellArc()
+        if (arc !== null) {
+          if (S.arcShown === null || Math.abs(arc - S.arcShown) >= 0.05) {
+            S.arcShown = arc
+            statusPush(Date.now(), 'shell', '激活进度 ' + Math.round(arc * 100) + '%')
+          }
+          S.arc = arc
+        }
+        var txt = String(root.textContent || '').replace(/\s+/g, ' ').trim()
+        if (txt !== S.shellText) {
+          S.shellText = txt
+          if (txt !== '' && /fail/i.test(txt) && S.failures.indexOf(txt) < 0) {
+            S.failures.push(txt)
+            statusPush(Date.now(), 'shell', '⚠ ' + txt)
+          }
+        }
+      } else if (S.shellSeen && !S.shellGone) {
+        S.shellGone = true
+        statusPush(Date.now(), 'shell', 'shell 启动页已收起（应用已挂载）')
+      }
+    } catch (e) { /* 忽略 */ }
+    try {
+      var rs = globalThis.performance && globalThis.performance.getEntriesByType
+        ? globalThis.performance.getEntriesByType('resource') : []
+      for (var i = 0; i < rs.length; i += 1) {
+        var r = rs[i]
+        if (S.resSeen[r.name]) continue
+        S.resSeen[r.name] = 1
+        var size = r.encodedBodySize || r.transferSize || 0
+        if (size < 60000) continue
+        var short = String(r.name).replace(/^.*\/plugins\//, 'plugins/').replace(/^.*\/assets\//, 'assets/')
+        if (short.length > 46) short = short.slice(0, 44) + '…'
+        statusPush(S.t0 + Math.round(r.responseEnd || r.startTime || 0), 'net',
+          short + '  ' + (size / 1048576).toFixed(2) + ' MB / ' + Math.round(r.duration) + 'ms')
+      }
+    } catch (e) { /* 忽略 */ }
+    renderStatus()
+  }
+
+  function renderStatus() {
+    if (!S || !nodes.statusLog) return
+    var body = ''
+    for (var i = 0; i < S.lines.length; i += 1) {
+      var L = S.lines[i]
+      var rel = (L.abs - S.t0) / 1000
+      body += (rel >= 0 ? '+' : '') + rel.toFixed(2) + 's  ' + L.src + '  ' + L.text + '\n'
+    }
+    if (S.lastBody !== body) { nodes.statusLog.textContent = body; S.lastBody = body }
+    var used = ((Date.now() - S.t0) / 1000).toFixed(1)
+    var pct = S.arc === null ? '不确定（shell 未提供）' : Math.round(S.arc * 100) + '%'
+    var head = '启动状态 · 已用 ' + used + 's · 激活进度 ' + pct +
+      ' · 启动图 ' + (S.bootSeen ? S.bootTotal + ' 条' : '等待中')
+    if (S.lastHead !== head) { nodes.statusHead.textContent = head; S.lastHead = head }
+    var tail = state.ready ? '✓ 外壳已就绪，正在进入…' : '… 等待外壳就绪'
+    var cls = state.ready ? 'ok' : ''
+    if (S.failures.length > 0) { tail = '⚠ 启动有失败项（点一下可进入）：' + S.failures[0].slice(0, 220); cls = 'bad' }
+    if (S.lastTail !== tail) {
+      nodes.statusTail.textContent = tail
+      nodes.statusTail.className = 'boot-splash-status-tail ' + cls
+      S.lastTail = tail
+    }
+  }
+
   /* -------------------------------------------------------------- 对外接口 */
 
   globalThis.__BOOT_SPLASH__ = {
     clientReady: function () {
       state.ready = true
+      statusPush(Date.now(), 'renderer', '外壳就绪（客户端插件报到）')
       if (!state.leaving) setHint(idleHint())
       maybeEnter()
     },
@@ -651,6 +869,9 @@
       })
     } catch (e) { /* 忽略 */ }
   }
+  // 状态窗独立于视频启动：它要覆盖整个启动过程，立刻开始采集（不受 delayMs 影响）。
+  startStatus()
+
   // 起播入口：只按 delayMs 等（为什么不做「等可见 / 等 rAF / 等首帧」那几条，见上一段注释）。
   if (DELAY > 0) globalThis.setTimeout(function () { start() }, DELAY)
   else start()

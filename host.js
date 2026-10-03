@@ -44,7 +44,23 @@ const BUNDLED_DIR = join(HERE, 'assets', 'videos')
 
 const ENTER_MODES = ['tail', 'end', 'click']
 const SOUND_MODES = ['auto', 'gesture', 'mute']
+/** 启动画面形态：video=全窗口视频 / status=启动状态窗 / both=视频作背景 + 状态面板。 */
+const SPLASH_MODES = ['video', 'status', 'both']
 const VIDEO_EXT = new Set(['.mp4', '.webm', '.m4v', '.mov'])
+
+/**
+ * 宿主侧启动事件（**带绝对时间戳**）。
+ * 为什么必须是绝对时刻：面板跑在渲染进程，它的 `performance.now()` 以导航为原点，
+ * 与宿主进程的时钟原点能差好几秒（2026-10-03 实测差 1.4–2.1s）。只有绝对时刻才能把两侧
+ * 事件排进**同一条时间轴**；否则界面上显示出来的先后顺序是错的。
+ */
+const BOOT_EVENTS = []
+function mark(label) {
+  try {
+    if (BOOT_EVENTS.length < 40) BOOT_EVENTS.push({ label, at: Date.now() })
+  } catch { /* 记事件失败不该影响启动 */ }
+}
+mark('host: boot-splash 模块已加载')
 
 export const DEFAULTS = Object.freeze({
   /** 总开关：关掉 = 一行都不注入、一次素材请求都不发。 */
@@ -74,6 +90,13 @@ export const DEFAULTS = Object.freeze({
    *   理由见 panel.js 里那段以「⚠ 这里故意不做」开头的注释。
    */
   delayMs: 0,
+  /**
+   * 启动画面形态：
+   *  · `video`  —— 全窗口视频（原行为）
+   *  · `status` —— **启动状态窗**：不播视频，只显示启动过程（条目图 / 激活进度 / 资源 / 里程碑 / 失败）
+   *  · `both`   —— 视频作背景，状态面板叠在上面（面板刻意做得很廉价，但仍会增加合成开销）
+   */
+  mode: 'video',
 })
 
 /* ------------------------------------------------------------------ 配置读写 */
@@ -129,6 +152,10 @@ export function validateConfig(raw) {
   if ('diag' in raw) {
     if (typeof raw.diag === 'boolean') out.diag = raw.diag
     else problems.push('diag 必须是布尔值，已用默认值')
+  }
+  if ('mode' in raw) {
+    if (SPLASH_MODES.includes(raw.mode)) out.mode = raw.mode
+    else problems.push(`mode 必须是 ${SPLASH_MODES.join(' / ')} 之一，已用默认值`)
   }
   if ('delayMs' in raw) {
     const n = Number(raw.delayMs)
@@ -440,6 +467,7 @@ function isLocalWrite(req) {
  * @param {object} ctx - 宿主插件上下文。
  */
 export function apply(ctx) {
+  mark('host: apply() 开始（插件开始接线）')
   const server = ctx.webServer
 
   // 启动即体检一次：让"没生效"从第一秒起就有话说。
@@ -634,9 +662,12 @@ export function apply(ctx) {
   }), 'boot-splash: clip route')
 
   // ⑤ 开机注入：配置行 + 面板脚本。关掉总开关 ⇒ 一行都不推（真关，不是"脚本自己判断"）。
+  mark('host: 4 条路由已挂载')
+
   ctx.on('webserver/index-inject', (table) => {
     const cfg = readConfig()
     if (!cfg.value.enabled) return
+    mark('host: 渲染 index ⇒ 注入开机面板')
     const listed = listClips(cfg.value.dir, cfg.value.clips)
     const panel = panelSource()
     if (panel.text === '') {
@@ -654,6 +685,10 @@ export function apply(ctx) {
         volume: cfg.value.volume,
         diag: cfg.value.diag === true,
         delayMs: cfg.value.delayMs,
+        mode: cfg.value.mode,
+        // 宿主侧的启动事件（绝对时刻）——面板据此把两侧事件排进同一条时间轴
+        bootEvents: BOOT_EVENTS.slice(),
+        hostStartedAt: BOOT_EVENTS.length > 0 ? BOOT_EVENTS[0].at : Date.now(),
         manifest: `${ROUTE}/clips.json`,
         route: ROUTE,
         problems: [...cfg.problems, ...listed.problems],
