@@ -73,6 +73,9 @@ console.log('\n[⓪c] 面板行为（桩 DOM）：点一下必须真开声音')
   const winListeners = {}
   const g = {
     __BOOT_SPLASH_CFG__: { fadeMs: 100, enterMode: 'end', holdMs: 5000, manifest: '/x/clips.json', problems: [] },
+    // 桩环境补上 performance：panel.js 的诊断会读 paint 等条目，桩也据此更接近真实浏览器
+    //（少了它，桩里测不出「页面已经画过」这类状态）。
+    performance: { getEntriesByType: () => [{ name: 'first-contentful-paint', startTime: 1 }] },
     addEventListener(type, fn) { winListeners[type] = fn },
     setTimeout: (fn) => 0,
     setInterval: () => 0,
@@ -174,7 +177,7 @@ writeFileSync(join(videos, 'note.txt'), 'not a video')
 const host = await import(new URL('../host.js', import.meta.url).href)
 
 console.log('\n[①] 配置校验（坏输入不抛、逐字段兜底）')
-ok('默认值冻结且字段齐全', Object.keys(host.DEFAULTS).join(',') === 'enabled,fadeMs,enterMode,holdMs,dir,clips,sound,volume')
+ok('默认值冻结且字段齐全', Object.keys(host.DEFAULTS).join(',') === 'enabled,fadeMs,enterMode,holdMs,dir,clips,sound,volume,diag,delayMs')
 {
   const r = host.validateConfig({ enabled: 'yes', fadeMs: 1e9, enterMode: 'nope', holdMs: -1, dir: 42, clips: 'x', extra: 1 })
   ok('坏字段全部落到默认值 + 有问题清单', r.value.enabled === true && r.value.fadeMs === 2000 && r.value.enterMode === 'tail' && r.value.holdMs === 15000 && r.value.dir === '' && Array.isArray(r.value.clips))
@@ -192,6 +195,16 @@ ok('默认值冻结且字段齐全', Object.keys(host.DEFAULTS).join(',') === 'e
   ok('非法 sound 落回默认并报问题', badSound.value.sound === 'gesture' && badSound.problems.some((p) => p.includes('sound')), badSound.problems)
   const badVol = host.validateConfig({ volume: 500 })
   ok('非法 volume 落回默认并报问题', badVol.value.volume === 100 && badVol.problems.some((p) => p.includes('volume')), badVol.problems)
+  ok('diag 默认关（不诊断就不多发一个请求）', host.DEFAULTS.diag === false)
+  const badDiag = host.validateConfig({ diag: 'yes' })
+  ok('非法 diag 落回默认并报问题', badDiag.value.diag === false && badDiag.problems.some((p) => p.includes('diag')), badDiag.problems)
+  const goodDiag = host.validateConfig({ diag: true })
+  ok('diag:true 正常接受且不报问题', goodDiag.value.diag === true && goodDiag.problems.length === 0, goodDiag.problems)
+  ok('delayMs 默认 0（默认与原行为逐字节一致）', host.DEFAULTS.delayMs === 0)
+  const badDelay = host.validateConfig({ delayMs: 99999 })
+  ok('非法 delayMs 落回默认并报问题', badDelay.value.delayMs === 0 && badDelay.problems.some((p) => p.includes('delayMs')), badDelay.problems)
+  const goodDelay = host.validateConfig({ delayMs: 3000 })
+  ok('delayMs 正常接受且不报问题', goodDelay.value.delayMs === 3000 && goodDelay.problems.length === 0, goodDelay.problems)
 }
 
 console.log('\n[①] 参数化读/写 + 原子写')

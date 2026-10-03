@@ -63,6 +63,17 @@ export const DEFAULTS = Object.freeze({
   sound: 'gesture',
   /** 音量 0–100。 */
   volume: 100,
+  /** 诊断模式：面板半侧记录播放质量并回传，宿主落盘 `$DSH_HOME/boot-splash-diag.json`。默认关。 */
+  diag: false,
+  /**
+   * 起播前的固定等待（毫秒，0–10000，默认 0 = 原行为）。先只显示渐变底。
+   * 动机（2026-10-03 实测，六次真实启动）：丢帧单调地随「起播所处的页面生命时刻」变化 ——
+   * 起播 0.2s → 5 丢帧/最长呈现空档 425ms（肉眼可感）；2.1s → 3/150ms（已不可感）；3.0s → 0/95ms。
+   * 本机取 2000 即可，3000 更稳但每次多等一秒。
+   * ⚠ 别试图用「等可见 / 等 rAF / 等 first paint」代替它：前两者已被证伪，第三者实现过又撤除，
+   *   理由见 panel.js 里那段以「⚠ 这里故意不做」开头的注释。
+   */
+  delayMs: 0,
 })
 
 /* ------------------------------------------------------------------ 配置读写 */
@@ -114,6 +125,15 @@ export function validateConfig(raw) {
     const n = Number(raw.volume)
     if (Number.isFinite(n) && n >= 0 && n <= 100) out.volume = Math.round(n)
     else problems.push('volume 必须是 0–100 的数字，已用默认值')
+  }
+  if ('diag' in raw) {
+    if (typeof raw.diag === 'boolean') out.diag = raw.diag
+    else problems.push('diag 必须是布尔值，已用默认值')
+  }
+  if ('delayMs' in raw) {
+    const n = Number(raw.delayMs)
+    if (Number.isFinite(n) && n >= 0 && n <= 10000) out.delayMs = Math.round(n)
+    else problems.push('delayMs 必须是 0–10000 的数字，已用默认值')
   }
   const known = new Set(Object.keys(DEFAULTS))
   for (const key of Object.keys(raw)) {
@@ -297,6 +317,84 @@ export function diagnose(ctx) {
   return status
 }
 
+/* -------------------------------------------------------------------- 诊断 */
+
+/**
+ * 诊断模式（`config.diag === true`）—— 只为回答一个问题：「开头几秒的顿，是谁占住了谁」。
+ *
+ *  · 宿主侧：量**事件循环停顿**（25ms 定时器实际迟到多久）与 /clip 每一发的处理耗时
+ *    ——「整文件同步读」若在咬人，会在这里现形，且能量出咬的时长；
+ *  · 面板侧：把播放质量（丢帧 / 等待缓冲 / 帧间隔）经 `clips.json?diag=<base64url>` 捎回来
+ *    —— 用 GET + 查询串，避免自定义头与 Origin 那两道写守卫的纠缠；
+ *  · 两边合并落盘到 `$DSH_HOME/boot-splash-diag.json`，由人/工具直接读，不依赖控制台。
+ *
+ * 纪律：诊断自身任何一步失败都**不许影响插件本体**，所以下面全部吞异常。
+ */
+const DIAG_PATH = join(DSH_HOME, 'boot-splash-diag.json')
+const DIAG_MAX = { lags: 600, clips: 300, panel: 12000 }
+
+const diagState = {
+  hostStartAt: Date.now(),
+  /** 事件循环停顿 {at: 相对启动毫秒, ms: 迟到多久}。 */
+  lags: [],
+  /** /clip 请求 {at, range, bytes, ms, note}。 */
+  clips: [],
+  /** 面板半侧回传的原始对象。 */
+  panel: null,
+}
+
+let diagMonitor = null
+let diagFlushTimer = null
+/** 诊断总闸（apply() 时按配置置位）。**关着的时候必须一个字节都不写、一个数组都不涨。** */
+let diagOn = false
+
+/** 合并写盘：300ms 去抖 + 原子改名（先写临时文件再 rename）。 */
+function diagFlush() {
+  if (!diagOn) return
+  if (diagFlushTimer !== null) return
+  diagFlushTimer = setTimeout(() => {
+    diagFlushTimer = null
+    try {
+      const payload = {
+        writtenAt: Date.now(),
+        pid: process.pid,
+        hostStartAt: diagState.hostStartAt,
+        panelAt: diagState.panelAt ?? null,
+        configPath: CONFIG_PATH,
+        panel: diagState.panel,
+        lags: diagState.lags,
+        clips: diagState.clips,
+      }
+      const tmp = `${DIAG_PATH}.tmp-${process.pid}`
+      writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+      renameSync(tmp, DIAG_PATH)
+    } catch { /* 诊断写不出去也不该牵连插件 */ }
+  }, 300)
+  diagFlushTimer.unref?.()
+}
+
+/**
+ * 事件循环停顿监视：一个 25ms 的定时器**实际迟到多久**，就是主进程被占住多久。
+ * 这是「同步整读阻塞主进程」最直接的证据，而且不需要被观测者配合。
+ */
+function startDiagMonitor(ctx) {
+  const INTERVAL = 25
+  let last = Date.now()
+  diagMonitor = setInterval(() => {
+    const now = Date.now()
+    const late = now - last - INTERVAL
+    last = now
+    if (late >= 30) {
+      diagState.lags.push({ at: now - diagState.hostStartAt, ms: late })
+      if (diagState.lags.length > DIAG_MAX.lags) diagState.lags.shift()
+      diagFlush()
+    }
+  }, INTERVAL)
+  diagMonitor.unref?.()
+  ctx.effect(() => () => { if (diagMonitor !== null) clearInterval(diagMonitor) }, 'boot-splash: diag monitor')
+  diagFlush()
+}
+
 /* -------------------------------------------------------------------- HTTP */
 
 function sendJson(res, code, body) {
@@ -350,6 +448,19 @@ export function apply(ctx) {
     ctx.logger?.warn?.(`boot-splash: 启动体检有 ${boot.problems.length} 项：${boot.problems.join(' | ')}`)
   } else {
     ctx.logger?.info?.(`boot-splash: 就绪（素材 ${boot.clips.length} 段，配置 ${boot.configSource}）`)
+  }
+
+  // 诊断模式：起事件循环停顿监视（默认关 ⇒ 零开销）。开关只在宿主启动时读一次。
+  diagOn = boot.effective?.diag === true
+  if (diagOn) {
+    try {
+      startDiagMonitor(ctx)
+      ctx.logger?.info?.(`boot-splash: 诊断模式已开 ⇒ 结果落盘 ${DIAG_PATH}`)
+    } catch (error) {
+      // 诊断起不来就彻底关掉：**绝不允许观测手段把插件本体拖下水**。
+      diagOn = false
+      ctx.logger?.warn?.(`boot-splash: 诊断模式启动失败，已关闭（插件本体不受影响）：${String(error?.message ?? error)}`)
+    }
   }
 
   const guard = (label, fn) => (req, res) => {
@@ -421,6 +532,22 @@ export function apply(ctx) {
     kind: 'exact',
     path: `${ROUTE}/clips.json`,
     handler: guard('clips', async (req, res) => {
+      // 诊断回传：面板把播放质量塞在 `?diag=<base64url>` 里捎回来。
+      // 用 GET + 查询串是**故意**的：GET 不带 Origin，也就不必去动 config 那两道写守卫。
+      const rawUrl = String(req.url ?? '')
+      const qi = rawUrl.indexOf('diag=')
+      if (diagOn && qi >= 0) {
+        try {
+          const rawDiag = rawUrl.slice(qi + 5).split('&')[0]
+          if (rawDiag.length > 0 && rawDiag.length <= DIAG_MAX.panel) {
+            diagState.panel = JSON.parse(Buffer.from(rawDiag, 'base64url').toString('utf8'))
+            // 记下"这一份面板报告是什么时候收到的"—— 文件的 writtenAt 会被反复重写，
+            // 拿它当"面板那次启动的时刻"会误判（2026-10-03 踩过一次）。
+            diagState.panelAt = Date.now()
+            diagFlush()
+          }
+        } catch { /* 诊断载荷坏了不许影响清单本身 */ }
+      }
       const cfg = readConfig()
       const listed = listClips(cfg.value.dir, cfg.value.clips)
       const rev = `${listed.clips.length}-${listed.clips.reduce((a, c) => a + (c.bytes ?? 0) + (c.mtime ?? 0), 0)}`
@@ -447,15 +574,31 @@ export function apply(ctx) {
     kind: 'prefix',
     path: `${ROUTE}/clip`,
     handler: guard('clip', async (req, res) => {
+      // 诊断：不动任何行为，只在每个出口记一笔「这一发是谁、要了多少、主进程被占住多久」。
+      const t0 = Date.now()
+      const rangeHeader = req.headers?.range
+      const record = (bytes, note) => {
+        if (!diagOn) return
+        diagState.clips.push({
+          at: Date.now() - diagState.hostStartAt,
+          range: typeof rangeHeader === 'string' ? rangeHeader : '',
+          bytes,
+          ms: Date.now() - t0,
+          note,
+        })
+        if (diagState.clips.length > DIAG_MAX.clips) diagState.clips.shift()
+        diagFlush()
+      }
       const cfg = readConfig()
       const listed = listClips(cfg.value.dir, cfg.value.clips)
       const raw = String(req.url ?? '')
       const name = basename(decodeURIComponent(raw.split('?')[0].replace(`${ROUTE}/clip/`, '')))
       const hit = listed.clips.find((c) => c.name === name)
       // 两道闸：basename 去掉目录成分 + 必须命中清单里的项 ⇒ 不存在穿越。
-      if (hit === undefined || listed.dir === '') { sendJson(res, 404, { error: 'not found', name }); return }
+      if (hit === undefined || listed.dir === '') { record(0, '404-miss'); sendJson(res, 404, { error: 'not found', name }); return }
       const abs = resolvePath(listed.dir, hit.name)
       if (!abs.startsWith(resolvePath(listed.dir) + sep) || !existsSync(abs)) {
+        record(0, '404-path')
         sendJson(res, 404, { error: 'not found', name })
         return
       }
@@ -476,6 +619,7 @@ export function apply(ctx) {
           readSync(fd, buf, 0, len, start)
           res.end(buf)
         } finally { closeSync(fd) }
+        record(len, '206')
         return
       }
       res.writeHead(200, { ...base, 'content-length': size })
@@ -485,6 +629,7 @@ export function apply(ctx) {
         readSync(fd, buf, 0, size, 0)
         res.end(buf)
       } finally { closeSync(fd) }
+      record(size, '200')
     }),
   }), 'boot-splash: clip route')
 
@@ -507,6 +652,8 @@ export function apply(ctx) {
         holdMs: cfg.value.holdMs,
         sound: cfg.value.sound,
         volume: cfg.value.volume,
+        diag: cfg.value.diag === true,
+        delayMs: cfg.value.delayMs,
         manifest: `${ROUTE}/clips.json`,
         route: ROUTE,
         problems: [...cfg.problems, ...listed.problems],

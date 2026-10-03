@@ -28,6 +28,10 @@
   // 'gesture'（默认）静音起播、第一下点击开声／'mute' 始终静音且不提示开声。
   var SOUND = cfg.sound === 'auto' || cfg.sound === 'mute' ? cfg.sound : 'gesture'
   var VOLUME = typeof cfg.volume === 'number' && cfg.volume >= 0 && cfg.volume <= 100 ? cfg.volume / 100 : 1
+  /** 诊断总开关（宿主注入，来自 config.diag）。默认 false ⇒ 本文件不采、不报、不多发一个请求。 */
+  var DIAG = cfg.diag === true
+  /** 起播前固定等多久（config.delayMs，默认 0 = 原行为）。先只显示渐变底。 */
+  var DELAY = typeof cfg.delayMs === 'number' && cfg.delayMs > 0 && cfg.delayMs <= 10000 ? cfg.delayMs : 0
 
   var state = {
     clipDone: false,
@@ -176,6 +180,9 @@
     if (state.entered) return
     state.entered = true
     state.leaving = true
+    // 诊断：进入时刻先记一笔，再留 1.2s 让最后一段画面的质量计数器落定后回传。
+    diagEvent('enter')
+    if (DIAG) globalThis.setTimeout(function () { flushDiag('entered') }, 1200)
     if (nodes.root) nodes.root.setAttribute('data-leaving', '1')
     try { globalThis.__BOOT_SPLASH_STATE__ = 'leaving' } catch (e) { /* 忽略 */ }
     globalThis.setTimeout(function () {
@@ -213,6 +220,29 @@
     nodes.video = video
     state.revealed = false
     nodes.root.setAttribute('data-revealed', '0')
+    state.clipName = clip.name
+
+    // 诊断挂载：**独立**监听，不改上/下任何一条既有逻辑；D 为空（cfg.diag 为假）时整段是空转。
+    if (D) {
+      var marks = ['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing', 'ended']
+      for (var mi = 0; mi < marks.length; mi += 1) {
+        video.addEventListener(marks[mi], (function (name) {
+          return function () {
+            diagEvent(name)
+            if (D && name === 'loadedmetadata' && video.duration) D.durationMs = Math.round(video.duration * 1000)
+          }
+        }(marks[mi])))
+      }
+      video.addEventListener('waiting', function () {
+        if (!D) return
+        D.waiting += 1
+        var b = bucket()
+        if (b) b.wait += 1
+        diagEvent('waiting')
+      })
+      video.addEventListener('stalled', function () { if (D) D.stalled += 1; diagEvent('stalled') })
+      watchFramePacing(video)
+    }
 
     var settled = false
     var reveal = function () {
@@ -301,6 +331,25 @@
       })
   }
 
+  /*
+   * ⚠ 这里**故意不做**「等 first paint 再起播」那条闸门 —— 2026-10-03 实现过、测过，又撤了。
+   * 两条原因都来自实测（六次真实启动，逐次对齐 `playing` 与首个 paint 条目）：
+   *
+   *  ① **前提不成立**：真正单调对应丢帧的是「起播的绝对时刻」，不是「离首帧多远」——
+   *       起播 0.2s → 丢帧 5/193，最长呈现空档 425ms（用户报「开头 1–3 秒顿」）
+   *       起播 2.1s → 丢帧 3/193，最长空档 150ms（用户确认「已经不卡了」）
+   *       起播 3.0s → 丢帧 0/193，最长空档 95–125ms（两次，均干净）
+   *     而首帧时刻本身逐次浮动（3192 / 4216 / 4032ms），与丢帧只是**相关**、不是因果：
+   *     有一次起播早于首帧 965ms 仍然 0 丢帧，另一次早 2123ms 掉 3 帧。
+   *
+   *  ② **判据自身行为无法解释**：某次运行里它在 3002ms 报「首帧已发生」并放行，
+   *     可同一份诊断里 `first-paint` 的 `startTime` 是 4032ms（且面板/宿主时钟已对齐核对过）。
+   *     一个自己解释不了的判据不该留在代码里。
+   *
+   * 结论：只用**固定的 `delayMs` 下限**。本机 2000ms 已被用户确认「不卡」（150ms 空档不可感），
+   * 3000ms 更稳但要多等一秒。判据请挂在**可感知的量**（最长呈现空档）上，别挂在「丢帧必须为 0」上。
+   */
+
   /* ------------------------------------------------------------ 手势与上界 */
 
   /** 左下角提示文案：把"静音/已开声"说清楚，用户才知道第一下点击是干什么的。 */
@@ -386,6 +435,186 @@
     } catch (e) { /* 绑定失败不致命 */ }
   }
 
+  /* -------------------------------------------------------------------- 诊断 */
+
+  /**
+   * 诊断只在 `cfg.diag === true` 时干活，只回答一个问题：
+   * **开头那几秒的顿，是「数据没到」还是「画面没画出来」**。四路证据各管一段：
+   *   · 每秒一桶记 `getVideoPlaybackQuality()` 的**增量**（丢帧落在哪一秒）+ `waiting`/`stalled`（数据没跟上）；
+   *   · `requestVideoFrameCallback` 的 `expectedDisplayTime` 间隔（画出来了、但节奏不对）；
+   *   · 每 250ms 心跳打一发 `/config.json?hb=1` —— 它是现成路由里最便宜的一个，且排在宿主事件循环上，
+   *     所以 /clip 的同步整读一旦开始占住主进程，心跳延迟就会跟着涨（这是它的判据）；
+   *   · `PerformanceObserver('longtask')` 记渲染进程主线程被占住多久。
+   * 结束时经 `clips.json?diag=<base64url>` 把结果捎回宿主落盘 ——
+   * 用 GET + 查询串是**故意**的：GET 不带 Origin，也就不必去碰 config 那两道写守卫。
+   */
+  var D = null
+  var clock = function () {
+    return globalThis.performance && globalThis.performance.now ? globalThis.performance.now() : Date.now()
+  }
+
+  function startDiag() {
+    if (!DIAG || D) return
+    D = {
+      t0: clock(), events: [], long: [], hb: [], sec: [],
+      waiting: 0, stalled: 0, quality: null, prev: null, sent: false,
+      win: globalThis.innerWidth + 'x' + globalThis.innerHeight,
+      dpr: globalThis.devicePixelRatio || 0,
+      // 绝对时刻：宿主侧记录用的是"相对它自己启动"的毫秒，两边原点相差可达数秒。
+      // 有了这个绝对值，就能把两半侧的时间轴精确对齐（先前只能靠 /clip 反推，误差不小）。
+      t0Epoch: Date.now(),
+    }
+    try {
+      if (globalThis.PerformanceObserver) {
+        var po = new globalThis.PerformanceObserver(function (list) {
+          var es = list.getEntries()
+          for (var i = 0; i < es.length; i += 1) {
+            if (D && D.long.length < 80) D.long.push([Math.round(es[i].startTime), Math.round(es[i].duration)])
+          }
+        })
+        po.observe({ entryTypes: ['longtask'] })
+      }
+    } catch (e) { /* 观测不到不致命 */ }
+
+    // 界面首帧 / 最大内容绘制：判定「顿」是否与界面首次光栅化同期（GPU 侧竞争的判据）。
+    D.paint = []
+    try {
+      if (globalThis.PerformanceObserver) {
+        var poPaint = new globalThis.PerformanceObserver(function (list) {
+          var es = list.getEntries()
+          for (var i = 0; i < es.length; i += 1) {
+            if (D && D.paint.length < 20) D.paint.push([es[i].name, Math.round(es[i].startTime)])
+          }
+        })
+        poPaint.observe({ type: 'paint', buffered: true })
+        poPaint.observe({ type: 'largest-contentful-paint', buffered: true })
+      }
+    } catch (e) { /* 忽略 */ }
+
+    D.hbTimer = globalThis.setInterval(function () {
+      if (!D || state.leaving || D.hb.length >= 160) return
+      var t = clock()
+      fetch(cfg.route + '/config.json?hb=1', { cache: 'no-store' })
+        .then(function () { if (D) D.hb.push([Math.round(t - D.t0), Math.round(clock() - t)]) })
+        .catch(function () { /* 心跳失败不致命 */ })
+    }, 250)
+
+    // 可见性时间线：留档页面是否曾被隐藏（起播卡顿排查用）。
+    D.vis = []
+    D.visPush = function (why) {
+      if (!D || D.vis.length >= 40) return
+      D.vis.push([why, Math.round(clock() - D.t0), document.visibilityState])
+    }
+    D.visPush('init')
+    try { globalThis.addEventListener('visibilitychange', function () { D.visPush('change') }) } catch (e) { /* 忽略 */ }
+
+    D.tick = globalThis.setInterval(function () { sampleQuality() }, 1000)
+  }
+
+  /** 取「当前秒」的桶（诊断时长上限 90s，够覆盖启动期）。 */
+  function bucket() {
+    if (!D) return null
+    var s = Math.floor((clock() - D.t0) / 1000)
+    while (D.sec.length <= s && D.sec.length < 90) {
+      D.sec.push({ s: D.sec.length, frames: 0, drop: 0, wait: 0, gap: 0, maxGap: 0, vis: document.visibilityState })
+    }
+    return s < D.sec.length ? D.sec[s] : null
+  }
+
+  /** 把累计计数器换算成「这一秒的增量」——这样"顿在第几秒"才是可读的。 */
+  function sampleQuality() {
+    if (!D || !nodes.video) return
+    var q = null
+    try { if (nodes.video.getVideoPlaybackQuality) q = nodes.video.getVideoPlaybackQuality() } catch (e) { /* 忽略 */ }
+    if (!q) return
+    if (D.prev) {
+      var b = bucket()
+      if (b) {
+        b.frames += q.totalVideoFrames - D.prev.total
+        b.drop += q.droppedVideoFrames - D.prev.drop
+      }
+      D.quality = { total: q.totalVideoFrames, dropped: q.droppedVideoFrames, corrupted: q.corruptedVideoFrames }
+    }
+    D.prev = { total: q.totalVideoFrames, drop: q.droppedVideoFrames }
+  }
+
+  /** 帧呈现节奏：两次回调的 expectedDisplayTime 之差超过 1.5 个标称帧长，就算一次「顿」。 */
+  function watchFramePacing(video) {
+    if (!D || typeof video.requestVideoFrameCallback !== 'function') return
+    var nominal = 1000 / 24          // 素材实测 24.000fps；只用于判定间隔异常，不参与播放
+    var last = null
+    var step = function (t, md) {
+      if (!D) return
+      if (md && typeof md.expectedDisplayTime === 'number') {
+        if (last !== null) {
+          var gap = md.expectedDisplayTime - last
+          if (gap > nominal * 1.5) {
+            var b = bucket()
+            if (b) { b.gap += 1; if (gap > b.maxGap) b.maxGap = Math.round(gap) }
+          }
+        }
+        last = md.expectedDisplayTime
+      }
+      try { video.requestVideoFrameCallback(step) } catch (e) { /* 忽略 */ }
+    }
+    try { video.requestVideoFrameCallback(step) } catch (e) { /* 忽略 */ }
+  }
+
+  /** 记一条媒体事件（时间都相对诊断起点）。 */
+  function diagEvent(name) {
+    if (!D) return
+    if (D.events.length < 60) D.events.push([name, Math.round(clock() - D.t0)])
+  }
+
+  function b64url(text) {
+    try {
+      var s = globalThis.btoa(unescape(encodeURIComponent(text)))
+      return s.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    } catch (e) { return '' }
+  }
+
+  /** 把结果捎回宿主（宿主落盘 `$DSH_HOME/boot-splash-diag.json`）。只发一次。 */
+  function flushDiag(reason) {
+    if (!D || D.sent) return
+    D.sent = true
+    try { if (D.hbTimer) globalThis.clearInterval(D.hbTimer) } catch (e) { /* 忽略 */ }
+    try { if (D.tick) globalThis.clearInterval(D.tick) } catch (e) { /* 忽略 */ }
+    sampleQuality()
+    var bufferedEnd = -1
+    try {
+      var bf = nodes.video && nodes.video.buffered
+      if (bf && bf.length > 0) bufferedEnd = Math.round(bf.end(bf.length - 1) * 1000)
+    } catch (e) { /* 忽略 */ }
+    var nav = null
+    try {
+      var navEntries = globalThis.performance.getEntriesByType ? globalThis.performance.getEntriesByType('navigation') : []
+      if (navEntries && navEntries[0]) {
+        nav = {
+          responseEnd: Math.round(navEntries[0].responseEnd),
+          dcl: Math.round(navEntries[0].domContentLoadedEventEnd),
+          load: Math.round(navEntries[0].loadEventEnd),
+        }
+      }
+    } catch (e) { /* 忽略 */ }
+    var report = {
+      v: 1, reason: reason, win: D.win, dpr: D.dpr,
+      sound: SOUND, mode: MODE, fadeMs: FADE, delayMs: DELAY, t0Epoch: D.t0Epoch,
+      clip: state.clipName || '', durationMs: D.durationMs || 0, bufferedEnd: bufferedEnd,
+      paint: D.paint, nav: nav,
+      waiting: D.waiting, stalled: D.stalled,
+      events: D.events, sec: D.sec, hb: D.hb, long: D.long,
+      vis: D.vis,
+      quality: D.quality, tries: TRIES,
+    }
+    var payload = b64url(JSON.stringify(report))
+    if (payload === '' || payload.length > 11000) return
+    try {
+      fetch(cfg.manifest + '?diag=' + payload, { cache: 'no-store', keepalive: true })
+        .catch(function () { /* 回传失败不致命 */ })
+    } catch (e) { /* 忽略 */ }
+    try { console.info('boot-splash diag', report) } catch (e) { /* 忽略 */ }
+  }
+
   /* -------------------------------------------------------------- 对外接口 */
 
   globalThis.__BOOT_SPLASH__ = {
@@ -412,7 +641,19 @@
   build()
   bind()
   setHint('正在准备…')
-  start()
+  // 诊断：默认关。开了也要保证"提前点掉/页面被换掉"时数据不丢。
+  if (DIAG) {
+    startDiag()
+    try {
+      globalThis.addEventListener('pagehide', function () { flushDiag('pagehide') })
+      globalThis.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'hidden') flushDiag('hidden')
+      })
+    } catch (e) { /* 忽略 */ }
+  }
+  // 起播入口：只按 delayMs 等（为什么不做「等可见 / 等 rAF / 等首帧」那几条，见上一段注释）。
+  if (DELAY > 0) globalThis.setTimeout(function () { start() }, DELAY)
+  else start()
 
   // 上界一：到点提示可点击（不自动进，避免盖住还在渲染的界面）
   globalThis.setTimeout(function () {
