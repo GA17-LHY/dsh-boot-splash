@@ -57,6 +57,12 @@ const VIDEO_EXT = new Set(['.mp4', '.webm', '.m4v', '.mov'])
 const BOOT_EVENTS = []
 function mark(label) {
   try {
+    // **同一条 label 只保留一次**（刷新时刻）：
+    // 页面每刷新一次宿主都会重新 mark 一次，不去重的话「渲染 index ⇒ 注入开机面板」
+    // 这类标记会不断追加 —— 数组越撑越满，而且读者会误以为发生过多次不同的事。
+    for (let i = 0; i < BOOT_EVENTS.length; i += 1) {
+      if (BOOT_EVENTS[i].label === label) { BOOT_EVENTS[i].at = Date.now(); return }
+    }
     if (BOOT_EVENTS.length < 40) BOOT_EVENTS.push({ label, at: Date.now() })
   } catch { /* 记事件失败不该影响启动 */ }
 }
@@ -104,6 +110,36 @@ export const DEFAULTS = Object.freeze({
    * 设 0 = 不节流，来多少显示多少。
    */
   lineGapMs: 120,
+  /**
+   * 状态窗日志打完后追加的**大写词标**（由代码的 5×7 字模绘制，不是图片）。
+   * 用换行或 `|` 分行；空字符串 = 不显示词标。
+   */
+  wordmark: 'Exploring the unexplored',
+  /**
+   * **代码窗的背景图**：图片文件的绝对路径或 `~/` 开头；留空 = 不用背景图（保持渐变底）。
+   * 只认这一个配置项 ⇒ `/bg` 路由的路径不由请求决定，没有穿越面。
+   */
+  bg: '',
+  /**
+   * 代码窗的**纯色背景**（CSS 颜色字符串）；留空 = 不用。
+   * 与 `bg` 的关系：纯色是**底色**，图片（若配了）画在它上面 ⇒ 两者可同时用，
+   * 图片读不到时你会看到纯色而不是渐变底。**纯色不被 `bgDim` 压暗**（那是"背景图压暗"）。
+   */
+  bgColor: '',
+  /** 背景图的**压暗强度** 0–100（默认 60）：不压暗的话，亮图上的字会读不清。 */
+  bgDim: 60,
+  /** 词标字号（像素，0–40）：**0 = 按列宽自动适配**（默认，防溢出）。 */
+  wordmarkSize: 0,
+  /** 词标**流光光效**开关（默认关：它每帧重绘文字，见 panel.js 里的代价说明）。 */
+  wordmarkShine: false,
+  /** 流光颜色（CSS 颜色字符串）。 */
+  wordmarkShineColor: '#8ff0ff',
+  /**
+   * **只在应用启动那一次页面加载上出现**（默认 true）。
+   * 开机面板注入在 index 页面里 ⇒ 任何整页重载都会重放它：实测皮肤管理器切皮肤后会
+   * `window.location.reload()`，于是"切皮肤也触发了开机动画"。关掉本项即恢复旧行为（便于反复预览）。
+   */
+  onlyOnAppStart: true,
 })
 
 /* ------------------------------------------------------------------ 配置读写 */
@@ -159,6 +195,40 @@ export function validateConfig(raw) {
   if ('diag' in raw) {
     if (typeof raw.diag === 'boolean') out.diag = raw.diag
     else problems.push('diag 必须是布尔值，已用默认值')
+  }
+  if ('wordmarkSize' in raw) {
+    const n = Number(raw.wordmarkSize)
+    if (Number.isFinite(n) && n >= 0 && n <= 40) out.wordmarkSize = Math.round(n)
+    else problems.push('wordmarkSize 必须是 0–40 的数字，已用默认值')
+  }
+  if ('wordmarkShine' in raw) {
+    if (typeof raw.wordmarkShine === 'boolean') out.wordmarkShine = raw.wordmarkShine
+    else problems.push('wordmarkShine 必须是布尔值，已用默认值')
+  }
+  if ('wordmarkShineColor' in raw) {
+    if (isPlainString(raw.wordmarkShineColor)) out.wordmarkShineColor = raw.wordmarkShineColor
+    else problems.push('wordmarkShineColor 必须是字符串，已用默认值')
+  }
+  if ('onlyOnAppStart' in raw) {
+    if (typeof raw.onlyOnAppStart === 'boolean') out.onlyOnAppStart = raw.onlyOnAppStart
+    else problems.push('onlyOnAppStart 必须是布尔值，已用默认值')
+  }
+  if ('bgColor' in raw) {
+    if (isPlainString(raw.bgColor) && raw.bgColor.length <= 64) out.bgColor = raw.bgColor
+    else problems.push('bgColor 必须是 ≤64 字符的字符串（CSS 颜色），已用默认值')
+  }
+  if ('bg' in raw) {
+    if (isPlainString(raw.bg)) out.bg = raw.bg
+    else problems.push('bg 必须是字符串（图片路径），已用默认值')
+  }
+  if ('bgDim' in raw) {
+    const n = Number(raw.bgDim)
+    if (Number.isFinite(n) && n >= 0 && n <= 100) out.bgDim = Math.round(n)
+    else problems.push('bgDim 必须是 0–100 的数字，已用默认值')
+  }
+  if ('wordmark' in raw) {
+    if (typeof raw.wordmark === 'string' && raw.wordmark.length <= 200) out.wordmark = raw.wordmark
+    else problems.push('wordmark 必须是 ≤200 字符的字符串，已用默认值')
   }
   if ('lineGapMs' in raw) {
     const n = Number(raw.lineGapMs)
@@ -286,6 +356,21 @@ export function resolveClipsDir(configured) {
   return ''
 }
 
+/**
+ * 解析生效的**背景图**（`config.bg`）：绝对路径或 `~/` 开头；留空 = 没有背景图。
+ * **只认这一个配置项** ⇒ 那条路由的路径完全不由请求决定，天然没有穿越面。
+ * @returns {{file: string, name: string, bytes: number, mtime: number}|null}
+ */
+export function resolveBg(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  const p = expandHome(raw.trim())
+  try {
+    const st = statSync(p)
+    if (!st.isFile()) return null
+    return { file: p, name: basename(p), bytes: st.size, mtime: Math.round(st.mtimeMs) }
+  } catch { return null }
+}
+
 export function listClips(dirRaw, wanted) {
   const problems = []
   const dir = resolveClipsDir(dirRaw)
@@ -335,7 +420,9 @@ export function diagnose(ctx) {
   const cfg = readConfig()
   const listed = listClips(cfg.value.dir, cfg.value.clips)
   const panel = panelSource()
+  const bgInfo = resolveBg(cfg.value.bg)
   const problems = [...cfg.problems, ...listed.problems, ...panel.problems]
+  if (cfg.value.bg.trim() !== '' && bgInfo === null) problems.push(`背景图读不到（bg=${cfg.value.bg}）⇒ 仍用渐变底`)
   if (!cfg.value.enabled) problems.push('总开关是关的 ⇒ 本插件当前不注入任何东西')
   const status = {
     ok: problems.length === 0,
@@ -464,11 +551,26 @@ function readBody(req, limit = 65536) {
   })
 }
 
-/** 只允许写本地来源：带 Origin 时必须是回环；并强制自定义头（跨源简单请求带不上自定义头）。 */
+/**
+ * 这个 Origin 算不算「自己人」？
+ *  · 本机回环的 http(s)：命令行 / 网页直连
+ *  · **应用自己的自定义协议**：桌面端页面跑在 `dsh-app://app` 上，它的 POST 会带上这个 origin。
+ *    ⚠ 2026-10-04 用户报「设置项里新增的几项都无法调整」——根因就是这里把**自家 origin** 判成了外源、
+ *    一律 403 退回，于是界面上看着改了、刷新就回滚。**这条必须在改守卫时一起想到。**
+ *
+ * 真正的跨站防线是那个**自定义请求头**（见 isLocalWrite）：跨源带不上自定义头，除非服务端答 CORS 预检，
+ * 而这里不答。Origin 只是多加一道，不该把自家页面拦在外面。
+ */
+function isOwnOrigin(origin) {
+  if (/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(origin)) return true
+  return /^dsh-app:\/\//i.test(origin)
+}
+
+/** 只允许写本地来源：带 Origin 时必须是回环或应用自己的协议；并强制自定义头。 */
 function isLocalWrite(req) {
   const origin = req.headers?.origin
-  if (typeof origin === 'string' && origin !== '' && !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(origin)) {
-    return `Origin 不是本机：${origin}`
+  if (typeof origin === 'string' && origin !== '' && !isOwnOrigin(origin)) {
+    return `Origin 既不是本机也不是本应用：${origin}`
   }
   if (req.headers?.['x-boot-splash-write'] !== '1') return '缺少 x-boot-splash-write: 1 头'
   return null
@@ -672,6 +774,29 @@ export function apply(ctx) {
       record(size, '200')
     }),
   }), 'boot-splash: clip route')
+  // ⑥ 背景图字节：**只认配置里那一个文件**，路径不由请求决定 ⇒ 天然没有穿越面。
+  ctx.effect(() => server.register({
+    kind: 'exact',
+    path: `${ROUTE}/bg`,
+    handler: guard('bg', async (req, res) => {
+      const info = resolveBg(readConfig().value.bg)
+      if (info === null) { sendJson(res, 404, { error: 'no background image configured' }); return }
+      const ext = extname(info.file).toLowerCase()
+      const type = ext === '.png' ? 'image/png'
+        : ext === '.webp' ? 'image/webp'
+          : ext === '.gif' ? 'image/gif'
+            : ext === '.svg' ? 'image/svg+xml'
+              : 'image/jpeg'
+      res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'content-length': info.bytes })
+      const fd = openSync(info.file, 'r')
+      try {
+        const buf = Buffer.alloc(info.bytes)
+        readSync(fd, buf, 0, info.bytes, 0)
+        res.end(buf)
+      } finally { closeSync(fd) }
+    }),
+  }), 'boot-splash: bg route')
+
 
   // ⑤ 开机注入：配置行 + 面板脚本。关掉总开关 ⇒ 一行都不推（真关，不是"脚本自己判断"）。
   mark('host: 4 条路由已挂载')
@@ -681,6 +806,7 @@ export function apply(ctx) {
     if (!cfg.value.enabled) return
     mark('host: 渲染 index ⇒ 注入开机面板')
     const listed = listClips(cfg.value.dir, cfg.value.clips)
+    const bgInfo = resolveBg(cfg.value.bg)
     const panel = panelSource()
     if (panel.text === '') {
       ctx.logger?.error?.('boot-splash: panel.js 读不到 ⇒ 本次不注入开机画面（其余功能不受影响）')
@@ -699,6 +825,19 @@ export function apply(ctx) {
         delayMs: cfg.value.delayMs,
         mode: cfg.value.mode,
         lineGapMs: cfg.value.lineGapMs,
+        wordmark: cfg.value.wordmark,
+        wordmarkSize: cfg.value.wordmarkSize,
+        wordmarkShine: cfg.value.wordmarkShine === true,
+        wordmarkShineColor: cfg.value.wordmarkShineColor,
+        bgColor: cfg.value.bgColor,
+        onlyOnAppStart: cfg.value.onlyOnAppStart !== false,
+        bg: bgInfo === null ? null : {
+          url: `${ROUTE}/bg?v=${bgInfo.mtime}-${bgInfo.bytes}`,
+          name: bgInfo.name,
+          bytes: bgInfo.bytes,
+          // 0–1 的不透明度，直接喂给 CSS 变量
+          dim: Math.max(0, Math.min(1, cfg.value.bgDim / 100)),
+        },
         // 宿主侧的启动事件（绝对时刻）——面板据此把两侧事件排进同一条时间轴
         bootEvents: BOOT_EVENTS.slice(),
         hostStartedAt: BOOT_EVENTS.length > 0 ? BOOT_EVENTS[0].at : Date.now(),

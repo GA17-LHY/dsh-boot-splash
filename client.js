@@ -1,4 +1,4 @@
-/**
+﻿/**
  * boot-splash · 客户端半侧（浏览器里跑的那一半）
  *
  * 两条通路都挂，哪个能出界面就用哪个（这是与那款第三方插件的核心区别：
@@ -48,6 +48,15 @@ window.__ModuleLoader__.load({
         modeStatus: '代码窗（启动状态窗，开机时显示程序在做什么）',
         modeBoth: '视频 + 状态窗（视频作背景）',
         lineGapMs: '逐行回放间隔（毫秒，0 = 不节流）',
+        wordmark: '代码词标（用 | 分行，留空 = 不显示）',
+        bg: '代码窗背景图（图片绝对路径或 ~/，留空 = 不用）',
+        bgColor: '代码窗纯色背景（留空 = 不用；建议偏深，文字是浅色）',
+        bgDim: '背景图压暗强度 0–100（只作用于图片）',
+        wordmarkSize: '词标字号（0 = 按列宽自动适配）',
+        wordmarkShine: '词标流光光效',
+        wordmarkShineHint: '渐变光带扫过笔画；实现上每帧重绘这块文字，略耗性能',
+        rmNote: '注意：系统开着「减少动态效果」（Windows 的"最佳性能"会开）——展开动画会被跳过；但**你显式打开的流光照常播放**。',
+        wordmarkShineColor: '流光颜色',
         dir: '素材目录（留空＝只有渐变底）',
         clips: '参与轮播的文件名（每行一个；留空＝目录内全部）',
         save: '保存',
@@ -57,6 +66,7 @@ window.__ModuleLoader__.load({
         problems: '发现的问题',
         none: '没有发现问题',
         configPath: '配置文件',
+        clientLoadedAt: '本设置界面（客户端半侧）加载于',
         clipsFound: '目录里找到的素材',
         status: '运行状态',
         diag: '打开体检',
@@ -82,6 +92,15 @@ window.__ModuleLoader__.load({
         modeStatus: 'Code window (boot status, no video)',
         modeBoth: 'Video + status window',
         lineGapMs: 'Line pacing (ms, 0 = off)',
+        wordmark: 'Code wordmark (| splits lines, empty = off)',
+        bg: 'Code-window background image (absolute path or ~/, empty = none)',
+        bgColor: 'Code-window solid colour (empty = none; pick a dark one, the text is light)',
+        bgDim: 'Background-image dim 0–100 (images only)',
+        wordmarkSize: 'Wordmark size (0 = auto-fit to width)',
+        wordmarkShine: 'Wordmark shimmer',
+        wordmarkShineHint: 'A gradient band sweeps the glyphs; it repaints this text every frame.',
+        rmNote: 'Note: reduced motion is on (Windows "best performance" turns it on). The entrance animation is skipped, but the shimmer you explicitly enabled still plays.',
+        wordmarkShineColor: 'Shimmer colour',
         dir: 'Clip directory (empty = gradient only)',
         clips: 'File names in rotation (one per line; empty = all in dir)',
         save: 'Save',
@@ -91,11 +110,18 @@ window.__ModuleLoader__.load({
         problems: 'Problems',
         none: 'No problems found',
         configPath: 'Config file',
+        clientLoadedAt: 'This settings UI (client half) loaded at',
         clipsFound: 'Clips found',
         status: 'Runtime state',
         diag: 'Run diagnosis',
       },
     }
+
+    /**
+         * 客户端半侧的**加载时刻**（宿主启动时把本文件快照进内存 ⇒ 改 client.js **必须重启宿主**，刷新不够）。
+         * 把它显示在设置页底部：一旦"改了没生效"，先看这个时间——它比你的上次重启还早，就说明页面跑的是旧代码。
+         */
+    var CLIENT_LOADED_AT = Date.now()
 
     function log(message) { try { console.info('boot-splash: ' + message) } catch (e) { /* 忽略 */ } }
     function warn(message, error) { try { console.warn('boot-splash: ' + message, error === undefined ? '' : error) } catch (e) { /* 忽略 */ } }
@@ -119,7 +145,8 @@ window.__ModuleLoader__.load({
       })
       var body = await r.json().catch(function () { return {} })
       if (!r.ok || body.ok !== true) {
-        throw new Error('保存被拒：' + (body.error || ('HTTP ' + r.status)) + (body.problems ? '（' + body.problems.join('；') + '）' : ''))
+        // reason 必须一起显示：原来只显示 'refused'，看不出到底为什么被拒（本轮排查就吃过这个亏）
+        throw new Error('保存被拒：' + (body.reason || body.error || ('HTTP ' + r.status)) + (body.problems ? '（' + body.problems.join('；') + '）' : ''))
       }
       return body
     }
@@ -133,27 +160,89 @@ window.__ModuleLoader__.load({
       var h = React.createElement
       var t = props.t
       var state = props.state
-      var setState = props.setState
+      var setStateRaw = props.setState
       var save = props.save
       var reload = props.reload
       var diagnose = props.diagnose
+      // 改一项就**自动保存**（防抖 500ms），不必再点「保存」。
+      // 用户 2026-10-04 报：「设置里修改选项，要点一次保存才能生效，改掉这个问题」。
+      // ⚠ 保存 ≠ 立刻生效：这些配置作用于**开机覆盖层**，要刷新页面（或重启应用）才会重新渲染 ——
+      //    所以保存后的提示仍写「刷新页面生效」。保存按钮保留，作为手动重试入口。
+      var autoTimer = 0
+      var setState = function (patch) {
+        setStateRaw(patch)
+        try { if (autoTimer) clearTimeout(autoTimer) } catch (e) { /* 忽略 */ }
+        autoTimer = setTimeout(function () { try { save() } catch (e) { /* 忽略 */ } }, 500)
+      }
       var busy = props.busy
       var status = props.status
       var message = props.message
 
-      var field = function (key, render) {
-        return h('label', { key: key, style: { display: 'block', margin: '10px 0' } },
-          h('div', { style: { fontSize: 12, opacity: 0.7, marginBottom: 4 } }, t(key)),
-          render())
+      /**
+       * 一行设置：**左标签、右控件**、行间细分隔线、标签下可挂一行灰色小字 ——
+       * 照「皮肤管理」页的设计语言。配色刻意**跟主题走**（currentColor + 半透明）：
+       * 那页的底色是**皮肤给的**，皮肤一切换/关掉，写死颜色就会很难看。
+       */
+      var hairline = '1px solid rgba(127,127,127,.22)'
+      var field = function (key, render, hint) {
+        return h('div', {
+          key: key,
+          style: { display: 'flex', alignItems: 'center', gap: 16, padding: '12px 2px', borderBottom: hairline },
+        },
+        h('div', { style: { flex: '1 1 auto', minWidth: 0 } },
+          h('div', { style: { fontSize: 14 } }, t(key)),
+          hint ? h('div', { style: { fontSize: 12, opacity: 0.6, marginTop: 2, lineHeight: 1.5 } }, t(hint)) : null),
+        h('div', { style: { flex: '0 0 auto' } }, render()))
+      }
+
+      /**
+       * 胶囊开关。形状**照抄宿主自己的 Switch.module.css**（`dsh-client-ui-primitives`）：
+       * 36×20 轨道 / 16px 滑块 / `translateX(16px)` 位移 / 颜色全走主题别名变量。
+       *
+       * ⚠ **关键是 `corner-shape: round`**：宿主/皮肤对控件施加了全局 **superellipse（方圆角）**，
+       * 不显式 opt out 的话，连 `border-radius:999px` 都会被画成**圆角方形** ——
+       * 我为此误判过两轮（先怪 `<button>` 的 `!important`、再改成 `<span>`，都不对）。
+       * 宿主那句注释写得很清楚：*"The capsule track and circular thumb opt out of the global superellipse"*。
+       *
+       * 也曾试过直接 `require` 宿主那个 Switch 组件来用 —— **会把设置页整页搞白**（渲染抛错，原因未查明），
+       * 所以改为**抄它的样式**：不依赖额外模块，也不会白屏。
+       */
+      var switchEl = function (checked, onChange) {
+        var on = checked === true
+        return h('span', {
+          role: 'switch',
+          tabIndex: 0,
+          'aria-checked': on,
+          'aria-disabled': busy === true,
+          onClick: function () { if (busy !== true) onChange(!on) },
+          onKeyDown: function (e) {
+            if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); if (busy !== true) onChange(!on) }
+          },
+          style: {
+            boxSizing: 'border-box', position: 'relative', flex: '0 0 auto',
+            display: 'inline-block',
+            width: 36, height: 20, padding: 2, border: 0,
+            borderRadius: 999, cornerShape: 'round',
+            background: on ? 'var(--dsw-alias-brand-primary,#4a6fd0)' : 'var(--dsw-alias-border-l3,#8a8f98)',
+            cursor: busy === true ? 'default' : 'pointer',
+            opacity: busy === true ? 0.5 : 1,
+          },
+        }, h('span', {
+          style: {
+            display: 'block', width: 16, height: 16,
+            borderRadius: '50%', cornerShape: 'round',
+            background: on
+              ? 'var(--dsw-alias-label-primary-foreground,#ffffff)'
+              : 'var(--dsw-alias-switch-thumb,#ffffff)',
+            transform: on ? 'translateX(16px)' : 'none',
+            transition: 'transform 120ms ease',
+          },
+        }))
       }
 
       var rows = []
       rows.push(field('enabled', function () {
-        return h('input', {
-          type: 'checkbox',
-          checked: state.enabled === true,
-          onChange: function (e) { setState({ enabled: e.target.checked }) },
-        })
+        return switchEl(state.enabled === true, function (v) { setState({ enabled: v }) })
       }))
       rows.push(field('mode', function () {
         var modes = [['video', 'modeVideo'], ['status', 'modeStatus'], ['both', 'modeBoth']]
@@ -209,9 +298,82 @@ window.__ModuleLoader__.load({
       }))
       rows.push(field('dir', function () {
         return h('input', {
-          type: 'text', style: { width: '100%' }, placeholder: 'D:\\videos',
+          type: 'text', style: { width: '100%' }, placeholder: '素材目录，例如 /path/to/videos 或 ~/videos',
           value: value(state.dir, ''),
           onChange: function (e) { setState({ dir: e.target.value }) },
+        })
+      }))
+      rows.push(field('wordmark', function () {
+        return h('input', {
+          type: 'text',
+          value: value(state.wordmark, 'Exploring the unexplored'),
+          onChange: function (e) { setState({ wordmark: e.target.value }) },
+        })
+      }))
+      rows.push(field('wordmarkSize', function () {
+        return h('input', {
+          type: 'number',
+          value: value(state.wordmarkSize, 0),
+          onChange: function (e) { setState({ wordmarkSize: Number(e.target.value) }) },
+        })
+      }))
+      rows.push(field('wordmarkShine', function () {
+        return switchEl(state.wordmarkShine === true, function (v) { setState({ wordmarkShine: v }) })
+      }, 'wordmarkShineHint'))
+      // 系统开了"减少动态效果"就**明确告知**哪些跳过、哪些照常 —— 不许静默
+      try {
+        if (globalThis.matchMedia && globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          rows.push(h('div', { key: 'rmNote', style: { fontSize: 12, opacity: 0.7, margin: '-4px 0 10px' } }, t('rmNote')))
+        }
+      } catch (e) { /* 读不到就不提示 */ }
+      rows.push(field('wordmarkShineColor', function () {
+        // 选色盘 + 一个可粘贴十六进制的文本框：前者好点，后者能精确输入
+        var hex = String(value(state.wordmarkShineColor, '#8ff0ff'))
+        return h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+          h('input', {
+            type: 'color',
+            value: /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#8ff0ff',
+            onChange: function (e) { setState({ wordmarkShineColor: e.target.value }) },
+            style: { width: 44, height: 28, padding: 0, cursor: 'pointer' },
+          }),
+          h('input', {
+            type: 'text',
+            value: hex,
+            onChange: function (e) { setState({ wordmarkShineColor: e.target.value }) },
+            style: { width: 120 },
+          }))
+      }))
+      rows.push(field('bgColor', function () {
+        // 与流光颜色同一套：调色盘 + 可粘贴十六进制的文本框
+        var hex = String(value(state.bgColor, ''))
+        return h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+          h('input', {
+            type: 'color',
+            value: /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#0a1c26',
+            onChange: function (e) { setState({ bgColor: e.target.value }) },
+            style: { width: 44, height: 28, padding: 0, cursor: 'pointer' },
+          }),
+          h('input', {
+            type: 'text',
+            value: hex,
+            placeholder: '留空 = 不用纯色',
+            onChange: function (e) { setState({ bgColor: e.target.value }) },
+            style: { width: 140 },
+          }))
+      }))
+      rows.push(field('bg', function () {
+        return h('input', {
+          type: 'text',
+          value: value(state.bg, ''),
+          placeholder: '例如 ~/bg.png 或 /path/to/boot.jpg',
+          onChange: function (e) { setState({ bg: e.target.value }) },
+        })
+      }))
+      rows.push(field('bgDim', function () {
+        return h('input', {
+          type: 'number',
+          value: value(state.bgDim, 60),
+          onChange: function (e) { setState({ bgDim: Number(e.target.value) }) },
         })
       }))
       rows.push(field('clips', function () {
@@ -248,11 +410,20 @@ window.__ModuleLoader__.load({
         }
       }
 
-      return h('div', { style: { maxWidth: 640 } },
-        h('div', { style: { fontSize: 13, opacity: 0.75, marginBottom: 8 } }, t('intro')),
-        rows,
+      // ⚠ **不要在这里再画标题**：宿主要按注册时给的 label() 渲染栏目标题（截图里因此出现过两个"启动画面"）。
+      // 这里只留说明段。
+      return h('div', { style: { maxWidth: 720 } },
+        h('div', { style: { fontSize: 13, opacity: 0.65, lineHeight: 1.6, marginBottom: 16 } }, t('intro')),
+        h('div', {
+          style: {
+            border: hairline, borderRadius: 12, padding: '2px 14px',
+            background: 'rgba(127,127,127,.06)',
+          },
+        }, rows),
         buttons,
         message === '' ? null : h('div', { style: { marginTop: 10, fontSize: 13 } }, message),
+        h('div', { style: { marginTop: 12, fontSize: 12, opacity: 0.55 } },
+          t('clientLoadedAt') + ' ' + new Date(CLIENT_LOADED_AT).toLocaleTimeString()),
         problems)
     }
 
@@ -268,8 +439,8 @@ window.__ModuleLoader__.load({
       var save = props.save
       var reload = props.reload
       var diagnose = props.diagnose
+      // 不在这里画标题：宿主要按注册时给的 label() 渲染栏目标题，自己再画一个就会出现两个"启动画面"。
       return h('section', { style: { padding: '4px 0' } },
-        h('h2', { style: { fontSize: 16, margin: '0 0 10px' } }, t('title')),
         h(Controls, { React: React, t: t, state: state, setState: setState, status: status, busy: busy, message: message, save: save, reload: reload, diagnose: diagnose }))
     }
 
@@ -305,7 +476,10 @@ window.__ModuleLoader__.load({
               enabled: e.enabled, fadeMs: e.fadeMs, enterMode: e.enterMode,
               holdMs: e.holdMs, dir: e.dir, clips: e.clips,
               sound: e.sound, volume: e.volume,
-              mode: e.mode, lineGapMs: e.lineGapMs,
+              mode: e.mode, lineGapMs: e.lineGapMs, wordmark: e.wordmark,
+              bg: e.bg, bgColor: e.bgColor, bgDim: e.bgDim,
+              wordmarkSize: e.wordmarkSize, wordmarkShine: e.wordmarkShine,
+              wordmarkShineColor: e.wordmarkShineColor,
             })
             state = Object.assign({}, state, { busy: false, effective: out.effective, message: '已保存（刷新页面生效）' })
             log('配置已保存')

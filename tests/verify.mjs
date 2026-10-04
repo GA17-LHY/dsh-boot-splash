@@ -1,4 +1,4 @@
-/**
+﻿/**
  * boot-splash 离线验证：不需要 DSH、不需要浏览器、不需要重启。
  *
  * 覆盖三件最容易静默失败的事：
@@ -177,7 +177,7 @@ writeFileSync(join(videos, 'note.txt'), 'not a video')
 const host = await import(new URL('../host.js', import.meta.url).href)
 
 console.log('\n[①] 配置校验（坏输入不抛、逐字段兜底）')
-ok('默认值冻结且字段齐全', Object.keys(host.DEFAULTS).join(',') === 'enabled,fadeMs,enterMode,holdMs,dir,clips,sound,volume,diag,delayMs,mode,lineGapMs')
+ok('默认值冻结且字段齐全', Object.keys(host.DEFAULTS).join(',') === 'enabled,fadeMs,enterMode,holdMs,dir,clips,sound,volume,diag,delayMs,mode,lineGapMs,wordmark,bg,bgColor,bgDim,wordmarkSize,wordmarkShine,wordmarkShineColor,onlyOnAppStart')
 {
   const r = host.validateConfig({ enabled: 'yes', fadeMs: 1e9, enterMode: 'nope', holdMs: -1, dir: 42, clips: 'x', extra: 1 })
   ok('坏字段全部落到默认值 + 有问题清单', r.value.enabled === true && r.value.fadeMs === 2000 && r.value.enterMode === 'tail' && r.value.holdMs === 15000 && r.value.dir === '' && Array.isArray(r.value.clips))
@@ -205,6 +205,36 @@ ok('默认值冻结且字段齐全', Object.keys(host.DEFAULTS).join(',') === 'e
   ok('非法 delayMs 落回默认并报问题', badDelay.value.delayMs === 0 && badDelay.problems.some((p) => p.includes('delayMs')), badDelay.problems)
   const goodDelay = host.validateConfig({ delayMs: 3000 })
   ok('delayMs 正常接受且不报问题', goodDelay.value.delayMs === 3000 && goodDelay.problems.length === 0, goodDelay.problems)
+  ok('wordmarkSize 默认 0（自动适配）、流光默认关', host.DEFAULTS.wordmarkSize === 0 && host.DEFAULTS.wordmarkShine === false)
+  const badSize = host.validateConfig({ wordmarkSize: 999 })
+  ok('非法 wordmarkSize 落回默认并报问题', badSize.value.wordmarkSize === 0 && badSize.problems.some((p) => p.includes('wordmarkSize')), badSize.problems)
+  const badShine = host.validateConfig({ wordmarkShine: 'yes' })
+  ok('非法 wordmarkShine 落回默认并报问题', badShine.value.wordmarkShine === false && badShine.problems.some((p) => p.includes('wordmarkShine')), badShine.problems)
+  const goodShine = host.validateConfig({ wordmarkShine: true, wordmarkShineColor: '#ff00aa', wordmarkSize: 18 })
+  ok('流光开关与颜色、字号都能正常接受', goodShine.value.wordmarkShine === true && goodShine.value.wordmarkShineColor === '#ff00aa' && goodShine.value.wordmarkSize === 18 && goodShine.problems.length === 0, goodShine.problems)
+  ok('onlyOnAppStart 默认 true（只在应用启动时出现）', host.DEFAULTS.onlyOnAppStart === true)
+  const badOoas = host.validateConfig({ onlyOnAppStart: 'yes' })
+  ok('非法 onlyOnAppStart 落回默认并报问题', badOoas.value.onlyOnAppStart === true && badOoas.problems.some((p) => p.includes('onlyOnAppStart')), badOoas.problems)
+  ok('bgColor 默认空（不用纯色）', host.DEFAULTS.bgColor === '')
+  const goodBgColor = host.validateConfig({ bgColor: '#0a1c26' })
+  ok('bgColor 正常接受', goodBgColor.value.bgColor === '#0a1c26' && goodBgColor.problems.length === 0, goodBgColor.problems)
+  const badBgColor = host.validateConfig({ bgColor: 123 })
+  ok('非法 bgColor 落回默认并报问题', badBgColor.value.bgColor === '' && badBgColor.problems.some((p) => p.includes('bgColor')), badBgColor.problems)
+  ok('bg 默认空（不用背景图）、bgDim 默认 60', host.DEFAULTS.bg === '' && host.DEFAULTS.bgDim === 60)
+  const badDim = host.validateConfig({ bgDim: 999 })
+  ok('非法 bgDim 落回默认并报问题', badDim.value.bgDim === 60 && badDim.problems.some((p) => p.includes('bgDim')), badDim.problems)
+  ok('bg 留空 ⇒ resolveBg 返回 null（不用背景图）', host.resolveBg('') === null && host.resolveBg('   ') === null)
+  ok('bg 指向不存在的文件 ⇒ resolveBg 返回 null（不抛）', host.resolveBg('D:/definitely/not/here.jpg') === null)
+  ok('bg 指向存在的文件 ⇒ resolveBg 给出字节数', (() => {
+    // 用 fileURLToPath：pathname 是**百分号编码**的，目录名含中文时不解码就找不到文件
+    const info = host.resolveBg(fileURLToPath(new URL('../package.json', import.meta.url)))
+    return info !== null && info.bytes > 0 && info.name === 'package.json'
+  })())
+  ok('wordmark 默认一行 Exploring the unexplored', host.DEFAULTS.wordmark === 'Exploring the unexplored', JSON.stringify(host.DEFAULTS.wordmark))
+  const offMark = host.validateConfig({ wordmark: '' })
+  ok('wordmark 空串 = 关掉词标，且不报问题', offMark.value.wordmark === '' && offMark.problems.length === 0, offMark.problems)
+  const badMark = host.validateConfig({ wordmark: 123 })
+  ok('非法 wordmark 落回默认并报问题', badMark.value.wordmark === 'Exploring the unexplored' && badMark.problems.some((p) => p.includes('wordmark')), badMark.problems)
   ok('lineGapMs 默认 120（逐行回放节奏）', host.DEFAULTS.lineGapMs === 120)
   const badGap = host.validateConfig({ lineGapMs: 99999 })
   ok('非法 lineGapMs 落回默认并报问题', badGap.value.lineGapMs === 120 && badGap.problems.some((p) => p.includes('lineGapMs')), badGap.problems)
@@ -319,7 +349,8 @@ console.log('\n[②] 宿主 apply：路由与注入行数')
   const { ctx, routes, injections } = makeCtx()
   host.apply(ctx)
 
-  ok('注册了 4 条路由', routes.length === 4, routes.map((r) => `${r.kind}:${r.path}`))
+  ok('注册了 5 条路由（含背景图 /bg）', routes.length === 5, routes.map((r) => `${r.kind}:${r.path}`))
+  ok('背景图路由是 exact 且路径不由请求决定', routes.some((r) => r.kind === 'exact' && r.path === '/plugins/boot-splash/bg'))
   ok('只有 clip 用 prefix（避免吃掉自己的 client.js）', routes.filter((r) => r.kind === 'prefix').length === 1 && routes.find((r) => r.kind === 'prefix').path.endsWith('/clip'))
   ok('manifest/status/config 都是 exact', ['/clips.json', '/status.json', '/config.json'].every((p) => routes.some((r) => r.kind === 'exact' && r.path.endsWith(p))))
   ok('订阅了 index 注入', injections.length === 1)
@@ -386,6 +417,16 @@ console.log('\n[②] 路由行为：manifest / status / config 读 / 写守卫')
     await new Promise((r) => setTimeout(r, 40))
     const body = JSON.parse(res.out.body)
     ok('本机 + 自定义头的写成功（200）', res.out.code === 200 && body.ok === true && body.effective.fadeMs === 999, res.out.body)
+    // ⚠ 这条是**回归闸门**：桌面端页面自己的 origin 是 dsh-app://app，之前被守卫判成外源 ⇒ 设置页改任何一项都 403。
+    // 少了这条，同一个事故会再来一次。
+    let res2 = fakeRes()
+    route('/config.json')(fakeReq({ method: 'POST', url: '/plugins/boot-splash/config.json', headers: { 'content-type': 'application/json', 'x-boot-splash-write': '1', origin: 'dsh-app://app' }, body: JSON.stringify({ fadeMs: 999 }) }), res2)
+    // 200 路径里有 `await readBody(req)` ⇒ 响应是**异步**的，不等一拍会拿到空响应（踩过）
+    await new Promise(function (r) { setTimeout(r, 30) })
+    ok('【回归】应用自己的 origin（dsh-app://app）必须放行', res2.out.code === 200, res2.out.body)
+    let res3 = fakeRes()
+    route('/config.json')(fakeReq({ method: 'POST', url: '/plugins/boot-splash/config.json', headers: { 'content-type': 'application/json', 'x-boot-splash-write': '1', origin: 'https://evil.example' }, body: JSON.stringify({ fadeMs: 4321 }) }), res3)
+    ok('【回归】外源 origin 仍必须被拒（403）', res3.out.code === 403, res3.out.body)
     ok('写后文件里确实是新值', host.readConfig().value.fadeMs === 999)
   }
   {

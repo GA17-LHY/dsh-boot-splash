@@ -21,6 +21,9 @@
   var FADE = typeof cfg.fadeMs === 'number' ? cfg.fadeMs : 2000
   var MODE = cfg.enterMode === 'click' || cfg.enterMode === 'end' ? cfg.enterMode : 'tail'
   var HOLD = typeof cfg.holdMs === 'number' ? cfg.holdMs : 15000
+  /** 面板开始跑的时刻；进入死线 = 它 + HOLD（见 maybeEnter 里的硬上限）。 */
+  var START_AT = Date.now()
+  var ENTER_DEADLINE = START_AT + HOLD
   var ABSOLUTE_CAP = HOLD + 20000                          // 绝对上限：再慢也放行
   var PROBLEMS = Array.isArray(cfg.problems) ? cfg.problems.slice(0, 6) : []
 
@@ -32,6 +35,45 @@
   /** 状态窗每行**至少**间隔多久露面（config.lineGapMs）。这是回放节奏；行首时间戳仍是实测值。 */
   var LINE_GAP = typeof cfg.lineGapMs === 'number' && cfg.lineGapMs >= 0 && cfg.lineGapMs <= 2000
     ? cfg.lineGapMs : 120
+  /** 日志打完后追加的大写词标（换行或 | 分行；空 = 不显示）。 */
+  var WORDMARK = typeof cfg.wordmark === 'string' ? cfg.wordmark.slice(0, 200) : 'Exploring the unexplored'
+  /** 代码窗背景图（宿主算好的 {url, name, bytes, dim}）；null = 不用背景图。 */
+  var BG = cfg.bg !== null && typeof cfg.bg === 'object' && typeof cfg.bg.url === 'string' ? cfg.bg : null
+  /** 代码窗纯色底（CSS 颜色）；空 = 不用。剥掉可能破坏 CSS 的字符，长度截断。 */
+  var BG_COLOR = typeof cfg.bgColor === 'string' ? cfg.bgColor.replace(/[;{}<>]/g, '').trim().slice(0, 64) : ''
+  /** 是否只在"应用启动那一次页面加载"上出现（见下方闸门处的长注释）。 */
+  var ONLY_ON_APP_START = cfg.onlyOnAppStart !== false
+  /** 页面在宿主启动后多久内加载才算"这一次开机"（毫秒）。宿主起得来 + 渲染 index 远小于这个数。 */
+  var START_WINDOW_MS = 20000
+  /** 宿主进程的启动时刻（宿主注入）；0 = 拿不到 ⇒ 不拦。 */
+  var HOST_STARTED_AT = typeof cfg.hostStartedAt === 'number' && cfg.hostStartedAt > 0 ? cfg.hostStartedAt : 0
+
+  /**
+   * 这次页面加载算不算「应用启动」？
+   * 判据：页面加载时刻与宿主进程启动时刻的间隔 —— 开机时两者只差几秒；
+   * 而 F5 / 切皮肤这类**整页重载**通常发生在开机很久之后。拿不到宿主启动时刻时不拦（宁可见也不误杀）。
+   */
+  function isAppStartLoad() {
+    if (!ONLY_ON_APP_START) return true
+    if (HOST_STARTED_AT <= 0) return true
+    return Date.now() - HOST_STARTED_AT <= START_WINDOW_MS
+  }
+  /** 词标字号：>0 用指定像素；0 = 按列宽自动适配（默认）。 */
+  var WM_SIZE = typeof cfg.wordmarkSize === 'number' && cfg.wordmarkSize >= 0 && cfg.wordmarkSize <= 40 ? cfg.wordmarkSize : 0
+  /**
+   * 词标**流光光效**（默认关）。实现＝渐变 + background-clip:text + 逐帧挪 background-position。
+   * ⚠ 这与「面板要廉价 / 只走合成器」是有出入的：它**每帧重绘这块文字**（面积小、不是全屏，
+   * 但确实不是 transform/opacity 那种纯合成）。所以：默认关、由设置页开关控制，
+   * 且系统开了「减少动态效果」时自动退回静态单色。**别据此把"每帧动画"当成可以随便加。**
+   */
+  var WM_SHINE = cfg.wordmarkShine === true
+  var WM_SHINE_COLOR = typeof cfg.wordmarkShineColor === 'string' ? cfg.wordmarkShineColor : '#8ff0ff'
+
+
+  /** 词标打完后再停多久才进界面（毫秒）。 */
+  var ART_HOLD = 700
+  /** 日志区最多显示几行（终端式尾部滚动）；不限行的话词标会被挤出画面。 */
+  var LOG_VIEW = 24
   var SHOW_STATUS = SPLASH !== 'video'
   var SHOW_VIDEO = SPLASH !== 'status'
   if (!SHOW_VIDEO) SOUND = 'mute'        // 没有视频就没有"开声音"这回事
@@ -78,9 +120,39 @@
     'pointer-events:none;display:flex;flex-direction:column;gap:8px}',
     '.boot-splash-status-head{color:#8fd3e8;font-weight:600;font-size:13px}',
     '.boot-splash-status-log{flex:1 1 auto;white-space:pre-wrap;overflow:hidden;opacity:.94}',
+    // 状态行**不钉底、也不提前显示**：它在 flex 流里排在日志与词标之后，一开头就可见的话
+    // 每多露一行就被往下挤 —— 用户看到的是"这句话跟着输出在走"（2026-10-03 用户报）。
+    // 正解：等**最后一行代码与词标都到位**之后再让它出现，位置一次定死，没有可见漂移。
     '.boot-splash-status-tail{color:#bcd6e2}',
+    '.boot-splash-status-tail:empty{display:none}',
     '.boot-splash-status-tail.ok{color:#8fe3a8}',
     '.boot-splash-status-tail.bad{color:#ffb0b0}',
+    // 一次性展开动画：**只动 transform/opacity ⇒ 只走合成器、不触发重排重绘**，
+    // 且只跑 360ms。这是我们对「面板要廉价」那条规矩的**有依据的放宽**：
+    // 当初出问题的是「每帧混合视频帧」与「模糊」，不是一次性的合成变换。别把它推广成"动画一律禁止"。
+    '.boot-splash-status{transform-origin:top left;animation:boot-splash-open 360ms cubic-bezier(.2,.9,.2,1) 1 both}',
+    '@keyframes boot-splash-open{from{transform:scale(.88,.72);opacity:0}to{transform:none;opacity:1}}',
+    '@media (prefers-reduced-motion: reduce){.boot-splash-status{animation:none}}',
+    '.boot-splash-wordmark{white-space:pre;line-height:1;font-size:13px;color:#9fe0f2;margin:4px 0 2px;flex:0 0 auto}',
+    '.boot-splash-wordmark:empty{display:none}',
+    // plain 回退（中文等）：普通字体的**大字**，允许换行，别用方块字那套极小行高。
+    '.boot-splash-wordmark[data-plain="1"]{font-size:40px;font-weight:700;line-height:1.12;letter-spacing:.06em;white-space:pre-wrap}',
+    // 词标流光：渐变 + background-clip:text，靠**逐帧改 background-position** 实现。
+    // ⚠ 它每帧重绘这块文字（面积小、非全屏，但不是纯合成）⇒ **默认关**、设置页可开；
+    //    系统开「减少动态效果」时自动退回静态单色。
+    '.boot-splash-wordmark[data-shine="1"]{background-image:linear-gradient(100deg,#9fe0f2 35%,var(--bs-shine,#8ff0ff) 50%,#9fe0f2 65%);background-size:220% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;-webkit-text-fill-color:transparent;animation:boot-splash-shine 2.6s linear infinite}',
+    '@keyframes boot-splash-shine{from{background-position:120% 0}to{background-position:-120% 0}}',
+    // ⚠ 流光**故意不**受 prefers-reduced-motion 影响：
+    // `data-shine="1"` 只有在用户**显式**打开 `wordmarkShine` 时才会被挂上 ——
+    // 显式选择应当压过隐式的系统偏好，否则他点了开关却什么都看不到（2026-10-04 就是这么被"尊重"掉的：
+    // 他的 Windows 是「最佳性能」⇒ Chromium 报 reduce ⇒ 我静默关掉了流光，且没有任何提示）。
+    // 隐式动画（如展开）仍按下面那条尊重系统偏好。
+    // 背景图 + 压暗层。压暗层用 ::before：它只画一次、不参与动画 ⇒ 合成开销可忽略。
+    // 不压暗的话，任意一张亮图上的文字都会读不清 —— 这是可读性的底线，不是装饰。
+    '.boot-splash[data-bg="1"]{background-image:var(--bs-bg);background-size:cover;background-position:center;background-repeat:no-repeat}',
+    '.boot-splash[data-bg="1"]::before{content:"";position:absolute;inset:0;pointer-events:none;background:rgba(5,13,18,var(--bs-dim,.6))}',
+    '.boot-splash-status{overflow:hidden}',
+    '.boot-splash-status-log{flex:0 1 auto}',
   ].join('')
 
   function part(tag, cls, text) {
@@ -95,6 +167,7 @@
   var statusHead = null
   var statusLog = null
   var statusTail = null
+  var wordmarkEl = null
 
   function build() {
     var style = document.getElementById(STYLE_ID)
@@ -130,12 +203,29 @@
       statusEl.appendChild(statusHead)
       statusEl.appendChild(statusLog)
       statusEl.appendChild(statusTail)
+      wordmarkEl = part('div', 'boot-splash-wordmark', '')
+      // 词标要**紧接在代码下面**，所以插在提示行之前（appendChild 会把它排到最底下）
+      statusEl.insertBefore(wordmarkEl, statusTail)
       root.appendChild(statusEl)
     }
 
     // 标题栏条（见 titlebarInset 的说明）：与覆盖层同级，固定贴顶。
     var strip = part('div', 'boot-splash-top')
     strip.setAttribute('data-on', '0')
+
+    try {
+      // 纯色是**底色**：先铺颜色、再（若有图）把图画在它上面 ⇒ 两者可同时配，
+      // 图片读不到时看到的也是你挑的颜色，而不是默认渐变。
+      if (BG_COLOR !== '') root.style.backgroundColor = BG_COLOR
+      if (BG !== null) {
+        root.style.setProperty('--bs-bg', 'url("' + String(BG.url) + '")')
+        root.style.setProperty('--bs-dim', String(typeof BG.dim === 'number' ? BG.dim : 0.6))
+        root.setAttribute('data-bg', '1')
+      } else if (BG_COLOR !== '') {
+        // 只配了纯色：把默认的 radial 渐变图关掉，否则它会盖住纯色
+        root.style.backgroundImage = 'none'
+      }
+    } catch (e) { /* 背景挂不上不影响其他功能 */ }
 
     var parent = document.body || document.documentElement
     parent.appendChild(strip)
@@ -146,6 +236,7 @@
       root: root, ui: ui, hint: hint, problems: problems, sound: sound,
       video: null, strip: strip,
       statusEl: statusEl, statusHead: statusHead, statusLog: statusLog, statusTail: statusTail,
+      wordmarkEl: wordmarkEl,
     }
     return nodes
   }
@@ -210,8 +301,28 @@
     if (!state.clipDone) return
     // 启动有失败项就不自动进：这个窗口存在的意义之一就是让人看见失败
     if (S && S.failures.length > 0) { setHint('启动有失败项 · 读完后点一下进入'); return }
+    /**
+     * ⚠ **硬上限：holdMs 是用户设的「最长等待」，任何前置条件都不该把它推翻。**
+     * 必须放在「等视频播完 / 逐行回放 / 词标 / 外壳就绪」这些闸门**之前** —— 它们原本全都没有上限，
+     * 只要有一条永远不满足（实测：等视频播完那条是个**无声的 return**），就会永远停在这一页。
+     * 到点一律放行，并**如实说明是超时进入**，不假装一切就绪。
+     * （上面失败项那条**故意**压过它：失败必须看得见，而点一下随时能进，不会被困住。）
+     */
+    if (Date.now() >= ENTER_DEADLINE) {
+      state.forcedEnter = '最长等待 ' + Math.round(HOLD / 1000) + 's 已到'
+      setHint('最长等待已到 · 直接进入')
+      diagEvent('forced-enter')
+      if (nodes.root) nodes.root.setAttribute('data-forced', '1')
+      enter()
+      return
+    }
     // 回放还没追平就先别进：否则后面几行会被一起带走，等于没看见
     if (S && S.revealed < S.lines.length) { setHint('正在逐行回放启动过程…'); return }
+    // 词标没打完、或打完还没停够，也不进（否则等于白画）
+    if (S && S.art.length > 0) {
+      if (S.artShown < S.art.length) { setHint('正在绘制词标…'); return }
+      if (S.artDoneAt > 0 && Date.now() - S.artDoneAt < ART_HOLD) { setHint('正在进入…'); return }
+    }
     if (!state.ready) { setHint('启动较慢，就绪后自动进入（点一下可立即进入）'); return }
     enter()
   }
@@ -711,15 +822,22 @@
 
   function startStatus() {
     if (!SHOW_STATUS || S) return
+    var plan = wordmarkPlan()
     S = {
       t0: Date.now(), lines: [], lastBody: null, lastHead: null, lastTail: null,
       bootSeen: false, bootTotal: 0, bootDetail: '',
       arc: null, arcShown: null, shellText: '', shellSeen: false, shellGone: false,
       resSeen: {}, failures: [], fcp: false,
       revealed: 0, lastRevealAt: 0,
+      art: plan.rows, artPlain: plan.plain, artShown: 0, artAt: 0, artDoneAt: 0,
     }
     var hb = Array.isArray(cfg.bootEvents) ? cfg.bootEvents : []
-    for (var i = 0; i < hb.length; i += 1) statusPush(hb[i].at, 'host', String(hb[i].label))
+    for (var i = 0; i < hb.length; i += 1) {
+      // ⚠ 宿主事件可能**早于本页**：宿主进程先启动、页面后来才加载（只刷新页面而不重启应用时必然如此）。
+      // 不标出来的话，读者会以为这几行也是"本次页面加载"里发生的 —— 那就是窗口在骗人。
+      var early = typeof hb[i].at === 'number' && hb[i].at < S.t0 - 50
+      statusPush(hb[i].at, 'host', (early ? '（应用启动时）' : '') + String(hb[i].label))
+    }
     statusPush(S.t0, 'panel', '面板脚本开始执行')
     var anchorAt = typeof cfg.hostStartedAt === 'number' ? cfg.hostStartedAt : null
     if (anchorAt !== null && !hb.length) statusPush(anchorAt, 'host', '宿主进程启动（无更早事件可读）')
@@ -822,6 +940,15 @@
         S.lastRevealAt = nowMs
       }
     }
+    // 日志全部露面之后，才开始**逐行打印**词标（同一节奏；它是文本，合成开销为零）
+    if (S.revealed >= S.lines.length && S.art.length > 0 && S.artShown < S.art.length) {
+      var artNow = Date.now()
+      if (S.artAt === 0 || artNow - S.artAt >= LINE_GAP) {
+        S.artShown += 1
+        S.artAt = artNow
+        if (S.artShown >= S.art.length) S.artDoneAt = artNow
+      }
+    }
     // 回放追平 ⇒ 重新评估能否进入（进入闸门可能一直压着没放行）
     if (S.revealed >= S.lines.length && S.revealed > 0 && !state.entered && !state.leaving) maybeEnter()
     renderStatus()
@@ -831,26 +958,150 @@
     if (!S || !nodes.statusLog) return
     var body = ''
     var shown = Math.min(S.revealed, S.lines.length)
-    for (var i = 0; i < shown; i += 1) {
+    var from = Math.max(0, shown - LOG_VIEW)
+    for (var i = from; i < shown; i += 1) {
       var L = S.lines[i]
       var rel = (L.abs - S.t0) / 1000
       body += (rel >= 0 ? '+' : '') + rel.toFixed(2) + 's  ' + L.src + '  ' + L.text + '\n'
     }
     if (S.lastBody !== body) { nodes.statusLog.textContent = body; S.lastBody = body }
+    if (nodes.wordmarkEl) {
+      var art = S.artShown > 0 ? S.art.slice(0, S.artShown).join('\n') : ''
+      if (S.lastArt !== art) {
+        nodes.wordmarkEl.textContent = art
+        S.lastArt = art
+        // plain（中文等）不按"列数×0.6"缩字号 —— 那个公式是给等宽方块字算的，
+        // 中日韩字符约 1em 宽，按它算会缩得过小；plain 走 CSS 里的固定大字并允许换行。
+        if (!S.artPlain) fitWordmark()
+        try { nodes.wordmarkEl.setAttribute('data-plain', S.artPlain === true ? '1' : '0') } catch (e) { /* 忽略 */ }
+        applyShine()
+      }
+    }
     var used = ((Date.now() - S.t0) / 1000).toFixed(1)
     var pct = S.arc === null ? '不确定（shell 未提供）' : Math.round(S.arc * 100) + '%'
     var head = '启动状态 · 已用 ' + used + 's · 激活进度 ' + pct +
       ' · 启动图 ' + (S.bootSeen ? S.bootTotal + ' 条' : '等待中') +
       (LINE_GAP > 0 ? ' · 逐行回放（行首时刻为实测）' : '')
     if (S.lastHead !== head) { nodes.statusHead.textContent = head; S.lastHead = head }
-    var tail = state.ready ? '✓ 外壳已就绪，正在进入…' : '… 等待外壳就绪'
-    var cls = state.ready ? 'ok' : ''
-    if (S.failures.length > 0) { tail = '⚠ 启动有失败项（点一下可进入）：' + S.failures[0].slice(0, 220); cls = 'bad' }
+    // 判据要同时看**日志**与**词标**：它在 DOM 里排在词标之后，只等日志会让词标把它继续往下挤
+    var tailReady = S.revealed >= S.lines.length && (S.art.length === 0 || S.artShown >= S.art.length)
+    var tail = ''
+    var cls = ''
+    if (tailReady) {
+      tail = state.ready ? '✓ 外壳已就绪，正在进入…' : '… 等待外壳就绪'
+      cls = state.ready ? 'ok' : ''
+      if (S.failures.length > 0) { tail = '⚠ 启动有失败项（点一下可进入）：' + S.failures[0].slice(0, 220); cls = 'bad' }
+    }
     if (S.lastTail !== tail) {
       nodes.statusTail.textContent = tail
       nodes.statusTail.className = 'boot-splash-status-tail ' + cls
       S.lastTail = tail
     }
+  }
+
+  /* ---------------------------------------------------------- 代码绘制的词标 */
+
+  /**
+   * 由**代码绘制**的大写词标：5×7 方块字模，只收录词标用得到的字母。
+   * 为什么用字符画而不是画布/图片：① 它是**文本** ⇒ 合成开销为零，不违背「面板要廉价」这条；
+   * ②「由代码绘制」的字面落实 —— 字模在代码里、词标由代码拼出来、再逐行打印出去。
+   */
+  var GLYPHS = {
+    A: [' ### ', '#   #', '#   #', '#####', '#   #', '#   #', '#   #'],
+    C: [' ### ', '#   #', '#    ', '#    ', '#    ', '#   #', ' ### '],
+    D: ['#### ', '#   #', '#   #', '#   #', '#   #', '#   #', '#### '],
+    E: ['#####', '#    ', '#    ', '#### ', '#    ', '#    ', '#####'],
+    H: ['#   #', '#   #', '#   #', '#####', '#   #', '#   #', '#   #'],
+    L: ['#    ', '#    ', '#    ', '#    ', '#    ', '#    ', '#####'],
+    N: ['#   #', '##  #', '# # #', '#  # ', '#   #', '#   #', '#   #'],
+    O: [' ### ', '#   #', '#   #', '#   #', '#   #', '#   #', ' ### '],
+    P: ['#### ', '#   #', '#   #', '#### ', '#    ', '#    ', '#    '],
+    R: ['#### ', '#   #', '#   #', '#### ', '# #  ', '#  # ', '#   #'],
+    T: ['#####', '  #  ', '  #  ', '  #  ', '  #  ', '  #  ', '  #  '],
+    U: ['#   #', '#   #', '#   #', '#   #', '#   #', '#   #', ' ### '],
+    X: ['#   #', '#   #', ' # # ', '  #  ', ' # # ', '#   #', '#   #'],
+    I: ['#####', '  #  ', '  #  ', '  #  ', '  #  ', '  #  ', '#####'],
+    G: [' ### ', '#   #', '#    ', '# ###', '#   #', '#   #', ' ### '],
+  }
+
+  /** 把一行文字拼成 7 行字符画。未收录的字符（含空格）画成空档，绝不抛。 */
+  function artRows(text) {
+    var rows = ['', '', '', '', '', '', '']
+    var chars = String(text).toUpperCase().split('')
+    for (var i = 0; i < chars.length; i += 1) {
+      var g = GLYPHS[chars[i]]
+      var sep = i === chars.length - 1 ? '' : ' '
+      if (g === undefined) {
+        for (var k = 0; k < 7; k += 1) rows[k] += '   ' + sep
+        continue
+      }
+      for (var r = 0; r < 7; r += 1) rows[r] += g[r].split('#').join('█') + sep
+    }
+    return rows
+  }
+
+  /**
+   * 每个非空格字符都有字模吗？**中文等表外字符一律为 false** —— 判据从这里出，别在渲染处猜。
+   */
+  function canDrawArt(text) {
+    var chars = String(text).toUpperCase().split('')
+    for (var i = 0; i < chars.length; i += 1) {
+      if (chars[i] === ' ') continue
+      if (GLYPHS[chars[i]] === undefined) return false
+    }
+    return true
+  }
+
+  /**
+   * 词标计划：返回 { rows, plain }。
+   * · 全部字符都能画 ⇒ 走 5×7 方块字（rows = 字符画行）。
+   * · **只要有画不出的字符（中文、日文、emoji…）⇒ plain:true，整块回退为「普通大字」**：
+   *   字模表里只有 15 个拉丁字母，硬画的结果是**整块空白**（用户实测：中文词标不显示）。
+   *   宁可换一种呈现，也不能让用户配了字却什么都看不到。
+   */
+  function wordmarkPlan() {
+    if (WORDMARK === '') return { rows: [], plain: false }
+    var parts = String(WORDMARK).split(/\n|\|/)
+    var lines = []
+    for (var i = 0; i < parts.length; i += 1) {
+      var t = parts[i].trim()
+      if (t !== '') lines.push(t)
+    }
+    if (lines.length === 0) return { rows: [], plain: false }
+    var all = true
+    for (var a = 0; a < lines.length; a += 1) if (!canDrawArt(lines[a])) all = false
+    if (!all) return { rows: lines, plain: true }
+    var out = []
+    for (var j = 0; j < lines.length; j += 1) {
+      if (out.length > 0) out.push('')
+      out = out.concat(artRows(lines[j]))
+    }
+    return { rows: out, plain: false }
+  }
+
+  /** 一行大字可能横向溢出 ⇒ 按列宽算一个放得下的字号（等宽字体，只算一次）。 */
+  function fitWordmark() {
+    try {
+      if (!S || !S.art.length || !nodes.wordmarkEl) return
+      var cols = 0
+      for (var i = 0; i < S.art.length; i += 1) cols = Math.max(cols, S.art[i].length)
+      var avail = nodes.statusEl && nodes.statusEl.clientWidth ? nodes.statusEl.clientWidth - 52 : 1120
+      var size = WM_SIZE > 0 ? WM_SIZE : Math.max(6, Math.min(13, avail / (cols * 0.6)))
+      nodes.wordmarkEl.style.fontSize = size.toFixed(1) + 'px'
+    } catch (e) { /* 忽略 */ }
+  }
+
+  /** 流光光效：给词标挂 data-shine 与颜色变量；**只有开了才挂**。 */
+  function applyShine() {
+    try {
+      if (!nodes.wordmarkEl) return
+      if (!WM_SHINE) { nodes.wordmarkEl.removeAttribute('data-shine'); return }
+      // 颜色只经 style.setProperty 下发（不拼进样式表），再剥掉可能破坏 CSS 的字符
+      var c = String(WM_SHINE_COLOR || '').replace(/[;{}<>]/g, '').slice(0, 64)
+      if (c === '') c = '#8ff0ff'
+      nodes.wordmarkEl.style.setProperty('--bs-shine', c)
+      nodes.wordmarkEl.setAttribute('data-shine', '1')
+    } catch (e) { /* 光效挂不上不影响词标本身 */ }
   }
 
   /* -------------------------------------------------------------- 对外接口 */
@@ -877,6 +1128,37 @@
 
   /* ------------------------------------------------------------------ 启动 */
 
+  /**
+   * ⚠ **闸门：只在"应用启动那一次页面加载"上出现。**
+   *
+   * 为什么需要它：开机面板是**注入到 index 页面里**的 ⇒ 任何**整页重载**都会把它再跑一遍。
+   * 实测到的实例：皮肤管理器切换皮肤后会
+   * `window.setTimeout(() => window.location.reload(), 1200)`
+   * （`skin-manager/src/client/SkinManager.tsx`）⇒ **切一次皮肤就重放一次"开机动画"**，而那根本不是开机。
+   * 同理 F5、"刷新页面看配置"也会重放。
+   *
+   * 这道闸门放在 `startStatus()` 与 `start()` **之前**，并顺手清掉可能已经建好的覆盖层 ——
+   * 否则会出现"盖住界面却不启动"的僵尸层（比不显示更糟）。
+   * 想要恢复旧行为（便于反复预览配置）把 `onlyOnAppStart` 设为 false。
+   */
+  if (!isAppStartLoad()) {
+    // ⚠ 覆盖层是**类** `.boot-splash`，**没有这个 id** —— 我第一版用 getElementById 删，
+    // 结果删不掉，留下一个"只建了壳、不更新、也永不进入"的僵尸层盖住整个界面（用户实测就是这个）。
+    // 所以这里用 querySelector，并且把两种写法都留着：id 是历史误写，类才是真的。
+    try {
+      var staleRoot = typeof document.querySelector === 'function' ? document.querySelector('.boot-splash') : null
+      if (!staleRoot) {
+        // 退化路径：没有 querySelector 的环境（含测试用的假 DOM）就自己从 body 的孩子里按类名找。
+        // 覆盖层是 `build()` 里 appendChild 到 body 的，所以这条一定能找到。
+        var kids = (document.body && document.body.children) || []
+        for (var ki = 0; ki < kids.length; ki += 1) {
+          if (String(kids[ki].className || '').indexOf('boot-splash') >= 0) { staleRoot = kids[ki]; break }
+        }
+      }
+      if (staleRoot && staleRoot.parentNode) staleRoot.parentNode.removeChild(staleRoot)
+    } catch (e) { /* 清不掉也不该影响宿主 */ }
+    return
+  }
   build()
   bind()
   setHint('正在准备…')
