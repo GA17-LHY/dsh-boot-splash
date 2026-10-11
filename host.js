@@ -140,6 +140,19 @@ export const DEFAULTS = Object.freeze({
    * `window.location.reload()`，于是"切皮肤也触发了开机动画"。关掉本项即恢复旧行为（便于反复预览）。
    */
   onlyOnAppStart: true,
+  /**
+   * 开机画面**是否铺满整个窗口**（默认 true）：连 Windows 标题栏那一条（含最小化/最大化/关闭）一起覆盖。
+   * ⚠ 那三个按钮是 Electron 原生 overlay，网页隐藏不掉；铺满后近黑图标在深色画面上近乎不可见，
+   * 但悬停时系统仍会画出高亮方块。设 false 则让出那一条、按钮保持清晰（2026-10-02 的旧行为）。
+   */
+  coverTitlebar: true,
+  /**
+   * 是否让右上**三个原生窗口按钮**在开机画面期间**变透明**（默认 true，best-effort）。
+   * 原理：宿主 preload 用隐藏探针读 `--dsw-specific-sidebar-fill` / `--dsw-alias-label-primary`
+   * 来决定 caption 颜色；插件注入一条**只命中该探针**的规则把这两个变量覆盖成透明，
+   * 宿主就会把按钮设成全透明。宿主若改了探针写法则此招失效（自动回落到"同色带子"，无副作用）。
+   */
+  hideCaptionButtons: true,
 })
 
 /* ------------------------------------------------------------------ 配置读写 */
@@ -208,6 +221,14 @@ export function validateConfig(raw) {
   if ('wordmarkShineColor' in raw) {
     if (isPlainString(raw.wordmarkShineColor)) out.wordmarkShineColor = raw.wordmarkShineColor
     else problems.push('wordmarkShineColor 必须是字符串，已用默认值')
+  }
+  if ('hideCaptionButtons' in raw) {
+    if (typeof raw.hideCaptionButtons === 'boolean') out.hideCaptionButtons = raw.hideCaptionButtons
+    else problems.push('hideCaptionButtons 必须是布尔值，已用默认值')
+  }
+  if ('coverTitlebar' in raw) {
+    if (typeof raw.coverTitlebar === 'boolean') out.coverTitlebar = raw.coverTitlebar
+    else problems.push('coverTitlebar 必须是布尔值，已用默认值')
   }
   if ('onlyOnAppStart' in raw) {
     if (typeof raw.onlyOnAppStart === 'boolean') out.onlyOnAppStart = raw.onlyOnAppStart
@@ -831,6 +852,8 @@ export function apply(ctx) {
         wordmarkShineColor: cfg.value.wordmarkShineColor,
         bgColor: cfg.value.bgColor,
         onlyOnAppStart: cfg.value.onlyOnAppStart !== false,
+        coverTitlebar: cfg.value.coverTitlebar !== false,
+        hideCaptionButtons: cfg.value.hideCaptionButtons !== false,
         bg: bgInfo === null ? null : {
           url: `${ROUTE}/bg?v=${bgInfo.mtime}-${bgInfo.bytes}`,
           name: bgInfo.name,

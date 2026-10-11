@@ -50,6 +50,10 @@ window.__ModuleLoader__.load({
         lineGapMs: '逐行回放间隔（毫秒，0 = 不节流）',
         wordmark: '代码词标（用 | 分行，留空 = 不显示）',
         bg: '代码窗背景图（图片绝对路径或 ~/，留空 = 不用）',
+        coverTitlebar: '铺满整个窗口（含标题栏）',
+        hideCaptionButtons: '隐藏窗口按钮（开机期间）',
+        hideCaptionButtonsHint: '让右上三个原生按钮在开机画面期间变透明（它们仍在原处、仍可点击）；靠覆盖宿主的取色探针实现，宿主改写法则自动失效（无副作用）',
+        coverTitlebarHint: '开启后连标题栏一起覆盖；那三个窗口按钮是系统画的，无法隐藏，只会因深色底而近乎看不见（悬停时仍会有高亮）',
         bgColor: '代码窗纯色背景（留空 = 不用；建议偏深，文字是浅色）',
         bgDim: '背景图压暗强度 0–100（只作用于图片）',
         wordmarkSize: '词标字号（0 = 按列宽自动适配）',
@@ -94,6 +98,11 @@ window.__ModuleLoader__.load({
         lineGapMs: 'Line pacing (ms, 0 = off)',
         wordmark: 'Code wordmark (| splits lines, empty = off)',
         bg: 'Code-window background image (absolute path or ~/, empty = none)',
+        coverTitlebar: 'Cover the whole window (incl. the caption)',
+        hideCaptionButtons: 'Hide the window buttons (during boot)',
+        hideCaptionButtonsHint: 'Makes the three native buttons transparent while the splash is up (still in place and clickable); works by overriding the host probe that feeds their colours, and degrades harmlessly.',
+
+        coverTitlebarHint: 'The three window buttons are drawn by the OS and cannot be hidden; on a dark splash they become nearly invisible (hover still highlights them).',
         bgColor: 'Code-window solid colour (empty = none; pick a dark one, the text is light)',
         bgDim: 'Background-image dim 0–100 (images only)',
         wordmarkSize: 'Wordmark size (0 = auto-fit to width)',
@@ -361,6 +370,12 @@ window.__ModuleLoader__.load({
             style: { width: 140 },
           }))
       }))
+      rows.push(field('coverTitlebar', function () {
+        return switchEl(state.coverTitlebar !== false, function (v) { setState({ coverTitlebar: v }) })
+      }, 'coverTitlebarHint'))
+      rows.push(field('hideCaptionButtons', function () {
+        return switchEl(state.hideCaptionButtons !== false, function (v) { setState({ hideCaptionButtons: v }) })
+      }, 'hideCaptionButtonsHint'))
       rows.push(field('bg', function () {
         return h('input', {
           type: 'text',
@@ -477,7 +492,8 @@ window.__ModuleLoader__.load({
               holdMs: e.holdMs, dir: e.dir, clips: e.clips,
               sound: e.sound, volume: e.volume,
               mode: e.mode, lineGapMs: e.lineGapMs, wordmark: e.wordmark,
-              bg: e.bg, bgColor: e.bgColor, bgDim: e.bgDim,
+              bg: e.bg, bgColor: e.bgColor, bgDim: e.bgDim, coverTitlebar: e.coverTitlebar,
+              hideCaptionButtons: e.hideCaptionButtons,
               wordmarkSize: e.wordmarkSize, wordmarkShine: e.wordmarkShine,
               wordmarkShineColor: e.wordmarkShineColor,
             })

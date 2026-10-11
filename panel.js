@@ -43,6 +43,10 @@
   var BG_COLOR = typeof cfg.bgColor === 'string' ? cfg.bgColor.replace(/[;{}<>]/g, '').trim().slice(0, 64) : ''
   /** 是否只在"应用启动那一次页面加载"上出现（见下方闸门处的长注释）。 */
   var ONLY_ON_APP_START = cfg.onlyOnAppStart !== false
+  /** 是否铺满整个窗口（含标题栏那一条）；见 applyTitlebarInset 里的局限说明。 */
+  var COVER_TITLEBAR = cfg.coverTitlebar !== false
+  /** 是否让那三个原生窗口按钮在开机期间变透明（best-effort，见 build() 里的说明）。 */
+  var HIDE_CAPTION = cfg.hideCaptionButtons !== false
   /** 页面在宿主启动后多久内加载才算"这一次开机"（毫秒）。宿主起得来 + 渲染 index 远小于这个数。 */
   var START_WINDOW_MS = 20000
   /** 宿主进程的启动时刻（宿主注入）；0 = 拿不到 ⇒ 不拦。 */
@@ -104,6 +108,11 @@
     '.boot-splash-top{position:fixed;left:0;right:0;top:0;z-index:2147483647;pointer-events:none;display:none;',
     'background:var(--dsw-specific-sidebar-fill,var(--dsw-alias-bg-base,transparent))}',
     '.boot-splash-top[data-on="1"]{display:block}',
+    // 覆盖模式（coverTitlebar）：这一条只当**拖拽区**用 —— 不画底色（画面透出来），
+    // 但保留 pointer-events 与 -webkit-app-region，否则开机画面期间窗口拖不动。
+    // 覆盖模式下那条带子**不再透明**：它用宿主 caption 的同色变量绘制（见 applyTitlebarInset 里的说明），
+    // 这样右上三个原生按钮的底与这条带子同色，视觉上连成一条，而不是突兀的一个深色方块。
+    '.boot-splash-top[data-cover="1"]{pointer-events:auto;-webkit-app-region:drag}',
     '.boot-splash video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity 400ms ease}',
     '.boot-splash[data-revealed="1"] video{opacity:1}',
     '.boot-splash-ui{position:absolute;left:22px;bottom:18px;display:flex;flex-direction:column;align-items:flex-start;gap:6px;',
@@ -115,7 +124,7 @@
     '.boot-splash-btn{pointer-events:auto;border:1px solid rgba(223,241,247,.45);background:rgba(5,13,18,.45);',
     'color:#dff1f7;border-radius:999px;padding:4px 12px;font:12px/1.4 inherit;cursor:pointer}',
     // 启动状态窗：纯文本、无模糊/无动画（理由见 panel.js 里那段注释）
-    '.boot-splash-status{position:absolute;inset:0;padding:22px 26px 96px 26px;box-sizing:border-box;',
+    '.boot-splash-status{position:absolute;inset:0;padding:calc(var(--bs-top-pad,0px) + 22px) 26px 96px 26px;box-sizing:border-box;',
     'color:#d6ecf5;font:12px/1.6 ui-monospace,Consolas,"Cascadia Mono","Microsoft YaHei",monospace;',
     'pointer-events:none;display:flex;flex-direction:column;gap:8px}',
     '.boot-splash-status-head{color:#8fd3e8;font-weight:600;font-size:13px}',
@@ -168,6 +177,8 @@
   var statusLog = null
   var statusTail = null
   var wordmarkEl = null
+  /** 让原生按钮变透明的那块 <style>（进入时整块移除 ⇒ 宿主颜色自动复原）。 */
+  var captionStyle = null
 
   function build() {
     var style = document.getElementById(STYLE_ID)
@@ -212,6 +223,23 @@
     // 标题栏条（见 titlebarInset 的说明）：与覆盖层同级，固定贴顶。
     var strip = part('div', 'boot-splash-top')
     strip.setAttribute('data-on', '0')
+    /**
+     * 让右上三个**原生**窗口按钮在开机画面期间变透明（best-effort，见本文件顶部注释）。
+     * 只命中宿主 preload 那个隐藏探针（body > span，style 里带 --dsw-specific-sidebar-fill），
+     * 把它的两个取色变量局部覆盖成透明 ⇒ 主进程 setTitleBarOverlay 收到 rgba(0,0,0,0)。
+     * 用**独立**的 style 节点（而不是并进主样式表），这样进入时能整块移除、让宿主颜色自动复原。
+     */
+    if (HIDE_CAPTION && captionStyle === null) {
+      try {
+        captionStyle = document.createElement('style')
+        captionStyle.id = 'boot-splash-caption'
+        captionStyle.textContent = 'body > span[style*="--dsw-specific-sidebar-fill"]{'
+          + '--dsw-specific-sidebar-fill:rgba(0,0,0,0) !important;'
+          + '--dsw-alias-label-primary:rgba(0,0,0,0) !important}'
+        ;(document.head || document.documentElement).appendChild(captionStyle)
+        if (root) root.setAttribute('data-caption-hidden', '1')
+      } catch (e) { captionStyle = null }
+    }
 
     try {
       // 纯色是**底色**：先铺颜色、再（若有图）把图画在它上面 ⇒ 两者可同时配，
@@ -264,10 +292,50 @@
 
   function applyTitlebarInset(rootEl, strip) {
     var inset = titlebarInset()
-    if (rootEl) rootEl.style.top = inset > 0 ? inset + 'px' : '0px'
+    /**
+     * coverTitlebar（默认 true）：**覆盖整个窗口**，连标题栏那一条一起铺满。
+     *
+     * ⚠ 那一带的最小化/最大化/关闭是 **Electron 原生 titleBarOverlay** 画的（宿主配置为透明底 +
+     * 近黑图标 `symbolColor:#0F1115`，见 `_asar\lib\main.js`），**网页无法让它们消失**。
+     * 铺满后近黑图标压在深色画面上**近乎不可见** ⇒ 视觉上就是"被盖住了"；
+     * 但**鼠标悬停时系统仍会画出高亮方块**，点击也照样有效——要彻底去掉只能由宿主改 symbolColor 或走全屏。
+     * 设 false 则恢复 2026-10-02 的老行为（让出那一条、用宿主 chrome 底色兜住，按钮保持清晰可辨）。
+     */
+    var cover = COVER_TITLEBAR
+    if (rootEl) {
+      rootEl.style.top = (cover || inset === 0) ? '0px' : inset + 'px'
+      // 状态窗/文字仍从标题栏**下方**开始（只让画布铺满，不让文字钻到按钮底下）
+      try { rootEl.style.setProperty('--bs-top-pad', inset > 0 ? inset + 'px' : '0px') } catch (e) { /* 忽略 */ }
+    }
     if (strip) {
-      strip.style.height = inset > 0 ? inset + 'px' : '0px'
+      // +2px：layout 标记的高度是 40px，而宿主 caption overlay 实际是 42px（main.js 里 titleBarOverlay.height）
+      // ⇒ 少这 2px 就会在那条带子下缘露出细细一线画面。
+      strip.style.height = inset > 0 ? (inset + 2) + 'px' : '0px'
       strip.setAttribute('data-on', inset > 0 ? '1' : '0')
+      strip.setAttribute('data-cover', (cover && inset > 0) ? '1' : '0')
+      /**
+       * **与宿主 caption 同色**（这是让那三个原生按钮"融进画面"的唯一办法 —— 网页改不了它的颜色，只能配合它）。
+       * 宿主 preload（`_asar\lib\preload-app.cjs`）用一个隐藏探针读
+       * `--dsw-specific-sidebar-fill`（caption 底色）与 `--dsw-alias-label-primary`（图标色），
+       * 经 IPC 交给主进程 `setTitleBarOverlay({color,symbolColor})`。**我们照读同一个变量**，
+       * 于是这条带子与按钮的底在任何主题/皮肤下都完全一致。
+       */
+      /**
+       * 那条带子的底色**跟着"按钮是否被藏起来"成对联动**：
+       * · 藏了（HIDE_CAPTION，默认）⇒ **透明**，让开机画面直接透上来 —— 这才是真正的"覆盖整个窗口"；
+       *   （用户实测：藏掉按钮后若仍铺 caption 底色，深色皮肤下就是一条**纯黑带子**，与画面不匹配。）
+       * · 没藏 ⇒ 仍铺 caption 的同色变量，让可见的按钮融进带子、不显突兀。
+       * 带子无论如何都保留 **拖拽区** 职责（-webkit-app-region: drag），所以窗口照样拖得动。
+       */
+      try {
+        strip.style.background = inset > 0
+          ? (HIDE_CAPTION
+            ? 'transparent'
+            : 'var(--dsw-specific-sidebar-fill,var(--dsw-alias-bg-base,transparent))')
+          : 'transparent'
+      } catch (e) { /* 取不到就沿用 CSS 里的兜底色 */ }
+      // 这一条还兼作**拖拽区**（-webkit-app-region: drag），否则开机画面期间窗口拖不动。
+      // 原生按钮在网页之上，点击不受影响。
     }
     return inset
   }
@@ -334,6 +402,13 @@
     // 诊断：进入时刻先记一笔，再留 1.2s 让最后一段画面的质量计数器落定后回传。
     diagEvent('enter')
     if (DIAG) globalThis.setTimeout(function () { flushDiag('entered') }, 1200)
+    // **移除变透明规则**：style 节点一增一删都会触发宿主 preload 的 head 观察器重算，
+    // 于是 caption 颜色自动回到当前主题的真实取值（不需要我们去 nudge 任何东西）。
+    try {
+      if (captionStyle !== null && captionStyle.parentNode) captionStyle.parentNode.removeChild(captionStyle)
+      captionStyle = null
+      if (nodes.root) nodes.root.setAttribute('data-caption-hidden', '0')
+    } catch (e) { /* 移不掉也不该影响进入 */ }
     if (nodes.root) nodes.root.setAttribute('data-leaving', '1')
     try { globalThis.__BOOT_SPLASH_STATE__ = 'leaving' } catch (e) { /* 忽略 */ }
     globalThis.setTimeout(function () {

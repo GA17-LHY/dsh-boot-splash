@@ -1,4 +1,4 @@
-﻿/**
+/**
  * boot-splash 离线验证：不需要 DSH、不需要浏览器、不需要重启。
  *
  * 覆盖三件最容易静默失败的事：
@@ -177,7 +177,7 @@ writeFileSync(join(videos, 'note.txt'), 'not a video')
 const host = await import(new URL('../host.js', import.meta.url).href)
 
 console.log('\n[①] 配置校验（坏输入不抛、逐字段兜底）')
-ok('默认值冻结且字段齐全', Object.keys(host.DEFAULTS).join(',') === 'enabled,fadeMs,enterMode,holdMs,dir,clips,sound,volume,diag,delayMs,mode,lineGapMs,wordmark,bg,bgColor,bgDim,wordmarkSize,wordmarkShine,wordmarkShineColor,onlyOnAppStart')
+ok('默认值冻结且字段齐全', Object.keys(host.DEFAULTS).join(',') === 'enabled,fadeMs,enterMode,holdMs,dir,clips,sound,volume,diag,delayMs,mode,lineGapMs,wordmark,bg,bgColor,bgDim,wordmarkSize,wordmarkShine,wordmarkShineColor,onlyOnAppStart,coverTitlebar,hideCaptionButtons')
 {
   const r = host.validateConfig({ enabled: 'yes', fadeMs: 1e9, enterMode: 'nope', holdMs: -1, dir: 42, clips: 'x', extra: 1 })
   ok('坏字段全部落到默认值 + 有问题清单', r.value.enabled === true && r.value.fadeMs === 2000 && r.value.enterMode === 'tail' && r.value.holdMs === 15000 && r.value.dir === '' && Array.isArray(r.value.clips))
