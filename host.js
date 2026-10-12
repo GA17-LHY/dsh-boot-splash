@@ -820,7 +820,7 @@ export function apply(ctx) {
 
 
   // ⑤ 开机注入：配置行 + 面板脚本。关掉总开关 ⇒ 一行都不推（真关，不是"脚本自己判断"）。
-  mark('host: 4 条路由已挂载')
+  mark('host: 路由已挂载')   // 不写条数：条数会变（曾写死 4，后来加到 5 条，代码窗里就显示了错的数字）
 
   ctx.on('webserver/index-inject', (table) => {
     const cfg = readConfig()

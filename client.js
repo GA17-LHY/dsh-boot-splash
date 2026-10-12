@@ -1,4 +1,4 @@
-﻿/**
+/**
  * boot-splash · 客户端半侧（浏览器里跑的那一半）
  *
  * 两条通路都挂，哪个能出界面就用哪个（这是与那款第三方插件的核心区别：
@@ -30,7 +30,7 @@ window.__ModuleLoader__.load({
       zh: {
         nav: '启动画面',
         title: '启动画面',
-        intro: '开机时叠一段全窗口画面，片尾交叉溶解进界面。配置存在文件里，改完刷新即生效。',
+        intro: '启动动画',
         enabled: '开启启动画面',
         fadeMs: '淡入淡出（毫秒）',
         enterMode: '进入方式',
@@ -47,6 +47,8 @@ window.__ModuleLoader__.load({
         modeVideo: '视频（全窗口播放素材）',
         modeStatus: '代码窗（启动状态窗，开机时显示程序在做什么）',
         modeBoth: '视频 + 状态窗（视频作背景）',
+        delayMs: '起播延迟（毫秒）',
+        delayMsHint: '仅影响视频形态：延迟这么久才开始播放与淡入，用来躲开宿主启动期',
         lineGapMs: '逐行回放间隔（毫秒，0 = 不节流）',
         wordmark: '代码词标（用 | 分行，留空 = 不显示）',
         bg: '代码窗背景图（图片绝对路径或 ~/，留空 = 不用）',
@@ -78,7 +80,7 @@ window.__ModuleLoader__.load({
       en: {
         nav: 'Boot splash',
         title: 'Boot splash',
-        intro: 'Overlays a full-window clip during boot, then dissolves into the app. Config lives in a file; reload to apply.',
+        intro: 'Boot animation',
         enabled: 'Enable boot splash',
         fadeMs: 'Fade (ms)',
         enterMode: 'Entry mode',
@@ -95,6 +97,8 @@ window.__ModuleLoader__.load({
         modeVideo: 'Video (full-window clip)',
         modeStatus: 'Code window (boot status, no video)',
         modeBoth: 'Video + status window',
+        delayMs: 'Playback delay (ms)',
+        delayMsHint: 'Video modes only: wait this long before the clip starts and fades in, to steer clear of host startup.',
         lineGapMs: 'Line pacing (ms, 0 = off)',
         wordmark: 'Code wordmark (| splits lines, empty = off)',
         bg: 'Code-window background image (absolute path or ~/, empty = none)',
@@ -260,6 +264,13 @@ window.__ModuleLoader__.load({
           onChange: function (e) { setState({ mode: e.target.value }) },
         }, modes.map(function (m) { return h('option', { key: m[0], value: m[0] }, t(m[1])) }))
       }))
+      rows.push(field('delayMs', function () {
+        return h('input', {
+          type: 'number',
+          value: value(state.delayMs, 0),
+          onChange: function (e) { setState({ delayMs: Number(e.target.value) }) },
+        })
+      }, 'delayMsHint'))
       rows.push(field('lineGapMs', function () {
         return h('input', {
           type: 'number',
@@ -428,7 +439,7 @@ window.__ModuleLoader__.load({
       // ⚠ **不要在这里再画标题**：宿主要按注册时给的 label() 渲染栏目标题（截图里因此出现过两个"启动画面"）。
       // 这里只留说明段。
       return h('div', { style: { maxWidth: 720 } },
-        h('div', { style: { fontSize: 13, opacity: 0.65, lineHeight: 1.6, marginBottom: 16 } }, t('intro')),
+        h('div', { style: { fontSize: 16, fontWeight: 600, marginBottom: 16 } }, t('intro')),
         h('div', {
           style: {
             border: hairline, borderRadius: 12, padding: '2px 14px',
@@ -490,6 +501,7 @@ window.__ModuleLoader__.load({
             var out = await writeConfig({
               enabled: e.enabled, fadeMs: e.fadeMs, enterMode: e.enterMode,
               holdMs: e.holdMs, dir: e.dir, clips: e.clips,
+              delayMs: e.delayMs,
               sound: e.sound, volume: e.volume,
               mode: e.mode, lineGapMs: e.lineGapMs, wordmark: e.wordmark,
               bg: e.bg, bgColor: e.bgColor, bgDim: e.bgDim, coverTitlebar: e.coverTitlebar,

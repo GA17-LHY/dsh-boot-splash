@@ -111,18 +111,13 @@ console.log('\n[⓪c] 面板行为（桩 DOM）：点一下必须真开声音')
   // pointerdown（窗口 capture 阶段）先把声音开掉，按钮自己的 click 再把它关回去。
   // 下面把真实事件序列原样重演一遍（点在按钮上 ⇒ 全局手势应忽略 ⇒ 只有按钮切一次）。
   const ui = root.children.find((c) => c._cls === 'boot-splash-ui')
-  const button = ui && ui.children.find((c) => c.attrs && c.attrs['data-bs-sound'] === '1')
-  ok('存在开声音按钮（gesture 模式）', button !== undefined)
-  video.muted = true                                    // 回到静音，重演序列
-  winListeners.pointerdown({ target: button })           // ① 点在按钮上
-  await new Promise((r) => setTimeout(r, 5))
-  ok('【回归】点在按钮上时全局手势不抢跑（仍静音）', video.muted === true, video.muted)
-  await button._ev.click({ target: button, stopPropagation() {}, preventDefault() {} })
-  await new Promise((r) => setTimeout(r, 5))
-  ok('【回归】按一下按钮 = 开声（不会被自己关回去）', video.muted === false, video.muted)
-  await button._ev.click({ target: button, stopPropagation() {}, preventDefault() {} })
-  await new Promise((r) => setTimeout(r, 5))
-  ok('再按一下 = 静音（可来回切）', video.muted === true, video.muted)
+  // 2026-10-12：画面上的「开声音」按钮已按用户要求删除；改测**全局手势**这条唯一入口。
+  const hasBtn = ui && ui.children.some((c) => c.attrs && c.attrs['data-bs-sound'] === '1')
+  ok('画面上的开声音按钮已删除（用户要求）', hasBtn !== true)
+  winListeners.pointerdown({ target: ui })
+  ok('【回归】第一下点击开声（唯一入口是全局手势）', video.muted === false, video.muted)
+  winListeners.pointerdown({ target: ui })
+  ok('【回归】第二下不再动声音（不会被关回去）', video.muted === false, video.muted)
 
   ok('面板没有产生告警', !logs.some((l) => l.startsWith('warn:')), logs.filter((l) => l.startsWith('warn:')))
 }

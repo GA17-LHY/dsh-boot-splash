@@ -196,14 +196,10 @@
     var hint = part('div', 'boot-splash-hint', '正在准备…')
     var problems = part('div', 'boot-splash-problems', PROBLEMS.length > 0 ? '⚠ ' + PROBLEMS.join('；') : '')
     var sound = null
-    if (SOUND !== 'mute') {
-      sound = part('button', 'boot-splash-btn', '🔊 开声音')
-      sound.type = 'button'
-      sound.setAttribute('data-bs-sound', '1')
-    }
+    // 2026-10-12 用户要求去掉画面上的「开声音」按钮 —— 它没用：**第一下点击的全局手势**已经覆盖它，
+    // 按钮只是同一件事的第二个入口。SOUND 配置与 setSound() 保留，手势照旧。
     ui.appendChild(hint)
     if (PROBLEMS.length > 0) ui.appendChild(problems)
-    if (sound) ui.appendChild(sound)
     root.appendChild(ui)
 
     if (SHOW_STATUS) {
@@ -369,21 +365,6 @@
     if (!state.clipDone) return
     // 启动有失败项就不自动进：这个窗口存在的意义之一就是让人看见失败
     if (S && S.failures.length > 0) { setHint('启动有失败项 · 读完后点一下进入'); return }
-    /**
-     * ⚠ **硬上限：holdMs 是用户设的「最长等待」，任何前置条件都不该把它推翻。**
-     * 必须放在「等视频播完 / 逐行回放 / 词标 / 外壳就绪」这些闸门**之前** —— 它们原本全都没有上限，
-     * 只要有一条永远不满足（实测：等视频播完那条是个**无声的 return**），就会永远停在这一页。
-     * 到点一律放行，并**如实说明是超时进入**，不假装一切就绪。
-     * （上面失败项那条**故意**压过它：失败必须看得见，而点一下随时能进，不会被困住。）
-     */
-    if (Date.now() >= ENTER_DEADLINE) {
-      state.forcedEnter = '最长等待 ' + Math.round(HOLD / 1000) + 's 已到'
-      setHint('最长等待已到 · 直接进入')
-      diagEvent('forced-enter')
-      if (nodes.root) nodes.root.setAttribute('data-forced', '1')
-      enter()
-      return
-    }
     // 回放还没追平就先别进：否则后面几行会被一起带走，等于没看见
     if (S && S.revealed < S.lines.length) { setHint('正在逐行回放启动过程…'); return }
     // 词标没打完、或打完还没停够，也不进（否则等于白画）
@@ -591,7 +572,7 @@
     if (SOUND === 'mute') return entry                        // 参数设成静音：完全不提开声
     var muted = !nodes.video || nodes.video.muted
     if (!muted) return entry
-    return MODE === 'click' ? '点一下开声音 · 再点进入' : '点一下开声音 · 播完自动进入'
+    return MODE === 'click' ? '点一下可立即进入' : '播完自动进入 · 点一下可立即进入'
   }
 
   /**
@@ -604,7 +585,6 @@
     if (!on) {
       video.muted = true
       state.audioOn = false
-      if (nodes.sound) nodes.sound.textContent = '🔊 开声音'
       setHint(idleHint())
       return
     }
@@ -612,7 +592,6 @@
     video.volume = VOLUME
     var done = function () {
       state.audioOn = true
-      if (nodes.sound) nodes.sound.textContent = '🔊 声音已开'
       setHint(idleHint())
     }
     var failed = function (reason) {
@@ -656,15 +635,6 @@
       globalThis.addEventListener('keydown', function (event) {
         if (event.key === 'Escape' || event.key === ' ' || event.key === 'Enter') onGesture(event)
       })
-      if (nodes.sound) {
-        nodes.sound.addEventListener('click', function (event) {
-          event.stopPropagation()
-          event.preventDefault()
-          // 显式控件：**以当前实际是否静音为准**切换一次（不依赖事件顺序，避免自己被自己的
-          // capture 监听抵消）。当前静音 ⇒ 开声；当前有声 ⇒ 静音。
-          setSound(nodes.video ? nodes.video.muted : true)
-        })
-      }
     } catch (e) { /* 绑定失败不致命 */ }
   }
 
@@ -1056,7 +1026,7 @@
     var pct = S.arc === null ? '不确定（shell 未提供）' : Math.round(S.arc * 100) + '%'
     var head = '启动状态 · 已用 ' + used + 's · 激活进度 ' + pct +
       ' · 启动图 ' + (S.bootSeen ? S.bootTotal + ' 条' : '等待中') +
-      (LINE_GAP > 0 ? ' · 逐行回放（行首时刻为实测）' : '')
+      (LINE_GAP > 0 ? ' · 逐行回放' : '')
     if (S.lastHead !== head) { nodes.statusHead.textContent = head; S.lastHead = head }
     // 判据要同时看**日志**与**词标**：它在 DOM 里排在词标之后，只等日志会让词标把它继续往下挤
     var tailReady = S.revealed >= S.lines.length && (S.art.length === 0 || S.artShown >= S.art.length)
@@ -1254,9 +1224,16 @@
   if (DELAY > 0) globalThis.setTimeout(function () { start() }, DELAY)
   else start()
 
-  // 上界一：到点提示可点击（不自动进，避免盖住还在渲染的界面）
+  // 上界一：到 holdMs **直接进入**（用户 2026-10-12 选 A：让"最长等待"名实相符）。
+  // 这是**唯一权威** —— 到点无条件放行，不再依赖 maybeEnter 被调用。
+  // 唯一例外仍是有失败项：那要看得见，等绝对上限（holdMs + 20s）或用户点一下。
   globalThis.setTimeout(function () {
-    if (!state.leaving && !state.ready) setHint('启动较慢，点一下可以立即进入')
+    if (state.leaving || state.entered) return
+    if (typeof S !== "undefined" && S && S.failures.length > 0) { setHint("启动有失败项 · 读完后点一下进入"); return }
+    state.forcedEnter = "holdMs（最长等待）"
+    setHint("最长等待已到 · 直接进入")
+    if (nodes.root) nodes.root.setAttribute("data-forced", "1")
+    enter()
   }, HOLD)
   // 上界二：绝对上限 —— 无论发生什么，到点强制放行（绝不把人卡在启动页）
   globalThis.setTimeout(function () {
